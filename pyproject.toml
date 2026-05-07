@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "py-chunks"
+version = "0.1.0"
+description = "Rust-backed Python chunking library"
+requires-python = ">=3.9"
+dependencies = []
+license = { text = "MIT" }
+readme = "README.md"
+keywords = ["chunking", "document", "pdf", "docx", "rust"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+python-source = "."
+module-name = "py_chunks._rust"
+features = ["pyo3/extension-module"]

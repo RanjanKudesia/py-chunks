@@ -1,0 +1,8 @@
+[MASTER]
+extension-pkg-allow-list=py_chunks._rust
+
+[MESSAGES CONTROL]
+disable=
+    duplicate-code,
+    too-few-public-methods,
+    missing-function-docstring
