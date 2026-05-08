@@ -43,7 +43,36 @@ def _resolve_chunker(filename: str):
     return chunker, ext
 
 
-def get_chunks_from_path(file_path: str) -> list[dict]:
+def _run_chunker(
+    chunker,
+    file_path: str,
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+):
+    if chunker is chunk_docx:
+        return chunker(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    return chunker(file_path)
+
+
+def get_chunks_from_path(
+    file_path: str,
+    *,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> list[dict]:
     """Chunk any supported document from a local path.
 
     Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
@@ -63,11 +92,28 @@ def get_chunks_from_path(file_path: str) -> list[dict]:
 
     chunker, _ = _resolve_chunker(file_path)
 
-    chunks, _ = chunker(file_path)
+    chunks, _ = _run_chunker(
+        chunker,
+        file_path,
+        mode,
+        window_size,
+        overlap,
+        sentences_per_chunk,
+        paragraphs_per_page,
+    )
     return chunks
 
 
-def get_chunks_from_bytes(data: bytes, filename: str) -> list[dict]:
+def get_chunks_from_bytes(
+    data: bytes,
+    filename: str,
+    *,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> list[dict]:
     """Chunk a document from raw bytes (e.g. an API file upload).
 
     Writes the bytes to a temporary file, runs the chunker, then deletes
@@ -97,14 +143,31 @@ def get_chunks_from_bytes(data: bytes, filename: str) -> list[dict]:
         tmp_path = tmp.name
 
     try:
-        chunks, _ = chunker(tmp_path)
+        chunks, _ = _run_chunker(
+            chunker,
+            tmp_path,
+            mode,
+            window_size,
+            overlap,
+            sentences_per_chunk,
+            paragraphs_per_page,
+        )
     finally:
         os.unlink(tmp_path)
 
     return chunks
 
 
-def get_chunks_from_fileobj(file_obj: Any, filename: str | None = None) -> list[dict]:
+def get_chunks_from_fileobj(
+    file_obj: Any,
+    filename: str | None = None,
+    *,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> list[dict]:
     """Chunk from a file-like object (open file, BytesIO, spooled temp file)."""
     inferred_name = filename or getattr(file_obj, "name", None)
     if not inferred_name:
@@ -118,10 +181,26 @@ def get_chunks_from_fileobj(file_obj: Any, filename: str | None = None) -> list[
     elif not isinstance(data, bytes):
         raise TypeError("file_obj.read() must return bytes or str")
 
-    return get_chunks_from_bytes(data, inferred_name)
+    return get_chunks_from_bytes(
+        data,
+        inferred_name,
+        mode=mode,
+        window_size=window_size,
+        overlap=overlap,
+        sentences_per_chunk=sentences_per_chunk,
+        paragraphs_per_page=paragraphs_per_page,
+    )
 
 
-def get_chunks_from_upload(upload_file: Any) -> list[dict]:
+def get_chunks_from_upload(
+    upload_file: Any,
+    *,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> list[dict]:
     """Chunk from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
     if not filename:
@@ -129,7 +208,15 @@ def get_chunks_from_upload(upload_file: Any) -> list[dict]:
 
     inner_file = getattr(upload_file, "file", None)
     if inner_file is not None and hasattr(inner_file, "read"):
-        return get_chunks_from_fileobj(inner_file, filename=filename)
+        return get_chunks_from_fileobj(
+            inner_file,
+            filename=filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(upload_file, "read"):
         data = upload_file.read()
@@ -143,13 +230,29 @@ def get_chunks_from_upload(upload_file: Any) -> list[dict]:
             data = bytes(data)
         elif not isinstance(data, bytes):
             raise TypeError("upload_file.read() must return bytes or str")
-        return get_chunks_from_bytes(data, filename)
+        return get_chunks_from_bytes(
+            data,
+            filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     raise TypeError("upload_file must provide .file.read() or .read()")
 
 
 def get_chunks_from_s3_presigned_url(
-    url: str, filename: str | None = None, timeout: int = 60
+    url: str,
+    filename: str | None = None,
+    timeout: int = 60,
+    *,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> list[dict]:
     """Download from a pre-signed URL and chunk the file."""
     inferred_name = filename
@@ -163,19 +266,49 @@ def get_chunks_from_s3_presigned_url(
     with urlopen(url, timeout=timeout) as response:
         data = response.read()
 
-    return get_chunks_from_bytes(data, inferred_name)
+    return get_chunks_from_bytes(
+        data,
+        inferred_name,
+        mode=mode,
+        window_size=window_size,
+        overlap=overlap,
+        sentences_per_chunk=sentences_per_chunk,
+        paragraphs_per_page=paragraphs_per_page,
+    )
 
 
-def get_chunks(source: Any, *, filename: str | None = None) -> list[dict]:
+def get_chunks(
+    source: Any,
+    *,
+    filename: str | None = None,
+    mode: str = "structural",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> list[dict]:
     """Unified chunking entrypoint across paths, bytes, file objects, uploads, and URLs."""
     if isinstance(source, (str, PathLike)):
         source_path = fspath(source)
         parsed = urlparse(source_path)
         if parsed.scheme in {"http", "https"}:
             return get_chunks_from_s3_presigned_url(
-                source_path, filename=filename
+                source_path,
+                filename=filename,
+                mode=mode,
+                window_size=window_size,
+                overlap=overlap,
+                sentences_per_chunk=sentences_per_chunk,
+                paragraphs_per_page=paragraphs_per_page,
             )
-        return get_chunks_from_path(source_path)
+        return get_chunks_from_path(
+            source_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if isinstance(source, memoryview):
         source = source.tobytes()
@@ -186,13 +319,36 @@ def get_chunks(source: Any, *, filename: str | None = None) -> list[dict]:
     if isinstance(source, bytes):
         if not filename:
             raise ValueError("filename is required when source is bytes")
-        return get_chunks_from_bytes(source, filename)
+        return get_chunks_from_bytes(
+            source,
+            filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(source, "filename"):
-        return get_chunks_from_upload(source)
+        return get_chunks_from_upload(
+            source,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(source, "read"):
-        return get_chunks_from_fileobj(source, filename=filename)
+        return get_chunks_from_fileobj(
+            source,
+            filename=filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     raise TypeError(
         "Unsupported source type. Use path/URL, bytes, file-like object, or upload object."
