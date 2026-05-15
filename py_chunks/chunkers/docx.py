@@ -67,3 +67,37 @@ def chunk_docx(
         "python_ms": python_ms,
     }
     return result["chunks"], timing
+
+
+def stream_chunk_docx(
+    file_path: str,
+    mode: str = "structural",
+) -> object:
+    """Stream chunks from a DOCX file as an iterator.
+
+    Returns an iterator that yields chunks one at a time.
+    Currently only supports mode="structural".
+
+    Args:
+        file_path: Path to the DOCX file.
+        mode: Chunking mode. Currently only "structural" is supported for streaming.
+
+    Returns:
+        Iterator that yields chunk dicts with keys: content, content_type, metadata.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the file extension is not .docx.
+        NotImplementedError: If mode is not "structural".
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+    if path.suffix.lower() != ".docx":
+        raise ValueError(f"Expected a .docx file, got: {file_path}")
+
+    if mode != "structural":
+        raise NotImplementedError(f"Streaming for {mode} mode coming soon")
+
+    return _rust.chunk_docx_structural_stream(str(path))
+    return _rust.chunk_docx_true_stream(str(path))

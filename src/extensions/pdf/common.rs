@@ -1,17 +1,10 @@
-use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
-use pyo3::wrap_pyfunction;
-use pythonize::pythonize;
 use serde_json::{json, Value};
-use std::fs;
-use std::time::Instant;
 
-const MAX_CHUNK_CHARS: usize = 1200;
-const MIN_CHUNK_CHARS: usize = 350;
+pub const MAX_CHUNK_CHARS: usize = 1200;
+pub const MIN_CHUNK_CHARS: usize = 350;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContentType {
+pub enum ContentType {
     PlainParagraph,
     HeadingSection,
     BulletNumberedList,
@@ -21,26 +14,26 @@ enum ContentType {
 }
 
 #[derive(Debug, Clone)]
-struct ChunkRecordInput {
-    content_type: ContentType,
-    content: String,
-    metadata: Value,
+pub struct ChunkRecordInput {
+    pub content_type: ContentType,
+    pub content: String,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]
-struct Paragraph {
-    text: String,
-    is_heading: bool,
+pub struct Paragraph {
+    pub text: String,
+    pub is_heading: bool,
 }
 
 #[derive(Debug)]
-struct ChunkUnit {
-    heading: Option<String>,
-    parts: Vec<String>,
+pub struct ChunkUnit {
+    pub heading: Option<String>,
+    pub parts: Vec<String>,
 }
 
 impl ContentType {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             ContentType::PlainParagraph => "plain_paragraph",
             ContentType::HeadingSection => "heading",
@@ -52,77 +45,7 @@ impl ContentType {
     }
 }
 
-#[pyfunction]
-fn chunk_pdf(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pdf") {
-        return Err(PyValueError::new_err(format!(
-            "Expected .pdf file path, got: {file_path}"
-        )));
-    }
-
-    // File I/O is not counted in rust_ms; rust_ms only measures extract + chunking.
-    let bytes = fs::read(file_path)
-        .map_err(|e| PyIOError::new_err(format!("Failed to read PDF file: {e}")))?;
-
-    let rust_start = Instant::now();
-    let chunks_raw = build_chunks_from_pdf_bytes(&bytes)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse PDF: {e}")))?;
-    let rust_ms = rust_start.elapsed().as_secs_f64() * 1000.0;
-
-    let chunk_list: Vec<PyObject> = chunks_raw
-        .into_iter()
-        .map(|c| {
-            let dict = PyDict::new_bound(py);
-            dict.set_item("content", &c.content)?;
-            dict.set_item("content_type", c.content_type.as_str())?;
-            dict.set_item("metadata", pythonize(py, &c.metadata)?)?;
-            Ok(dict.into_any().unbind())
-        })
-        .collect::<PyResult<_>>()?;
-
-    let result = PyDict::new_bound(py);
-    result.set_item("chunks", chunk_list)?;
-    result.set_item("rust_ms", (rust_ms * 1000.0).round() / 1000.0)?;
-    Ok(result.into_any().unbind())
-}
-
-pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(chunk_pdf, m)?)?;
-    Ok(())
-}
-
-fn build_chunks_from_pdf_bytes(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, String> {
-    let raw_text = pdf_extract::extract_text_from_mem(bytes)
-        .map_err(|e| format!("Failed to extract text from PDF: {e}"))?;
-
-    if raw_text.trim().is_empty() {
-        return Err("PDF appears to contain no extractable text".to_string());
-    }
-
-    let paragraphs = extract_paragraphs(&raw_text);
-    let units = absorb_heading_only_units(build_units(paragraphs));
-
-    let mut raw_chunks: Vec<String> = Vec::new();
-    for unit in &units {
-        raw_chunks.extend(split_unit(unit, MAX_CHUNK_CHARS));
-    }
-
-    let chunks = merge_short_chunks(raw_chunks, MIN_CHUNK_CHARS, MAX_CHUNK_CHARS);
-    if chunks.is_empty() {
-        return Err("No chunks generated from PDF document".to_string());
-    }
-
-    Ok(chunks
-        .into_iter()
-        .map(|text| ChunkRecordInput {
-            content_type: classify_chunk(&text),
-            content: text,
-            metadata: pdf_metadata(),
-        })
-        .collect())
-}
-
-fn extract_paragraphs(raw_text: &str) -> Vec<Paragraph> {
+pub fn extract_paragraphs(raw_text: &str) -> Vec<Paragraph> {
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     let mut in_toc = false;
 
@@ -167,7 +90,7 @@ fn extract_paragraphs(raw_text: &str) -> Vec<Paragraph> {
     paragraphs
 }
 
-fn split_pages(text: &str) -> Vec<String> {
+pub fn split_pages(text: &str) -> Vec<String> {
     let pages: Vec<String> = text
         .split('\u{000C}')
         .map(str::trim)
@@ -182,7 +105,7 @@ fn split_pages(text: &str) -> Vec<String> {
     }
 }
 
-fn split_raw_blocks(text: &str) -> Vec<Vec<String>> {
+pub fn split_raw_blocks(text: &str) -> Vec<Vec<String>> {
     let mut blocks: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
 
@@ -204,7 +127,7 @@ fn split_raw_blocks(text: &str) -> Vec<Vec<String>> {
     blocks
 }
 
-fn build_paragraph(lines: Vec<String>) -> Option<Paragraph> {
+pub fn build_paragraph(lines: Vec<String>) -> Option<Paragraph> {
     if lines.is_empty() {
         return None;
     }
@@ -229,7 +152,7 @@ fn build_paragraph(lines: Vec<String>) -> Option<Paragraph> {
     Some(Paragraph { text, is_heading })
 }
 
-fn build_units(paragraphs: Vec<Paragraph>) -> Vec<ChunkUnit> {
+pub fn build_units(paragraphs: Vec<Paragraph>) -> Vec<ChunkUnit> {
     let mut units: Vec<ChunkUnit> = Vec::new();
     let mut current_heading: Option<String> = None;
     let mut current_parts: Vec<String> = Vec::new();
@@ -278,7 +201,7 @@ fn build_units(paragraphs: Vec<Paragraph>) -> Vec<ChunkUnit> {
     units
 }
 
-fn absorb_heading_only_units(units: Vec<ChunkUnit>) -> Vec<ChunkUnit> {
+pub fn absorb_heading_only_units(units: Vec<ChunkUnit>) -> Vec<ChunkUnit> {
     let mut result: Vec<ChunkUnit> = Vec::new();
     let mut pending_prefix: Option<String> = None;
 
@@ -316,7 +239,7 @@ fn absorb_heading_only_units(units: Vec<ChunkUnit>) -> Vec<ChunkUnit> {
     result
 }
 
-fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
+pub fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();
     let mut current_parts: Vec<String> = Vec::new();
     let mut current_len: usize = 0;
@@ -354,7 +277,7 @@ fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
     chunks.into_iter().filter(|c| !c.is_empty()).collect()
 }
 
-fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
+pub fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
     if text.len() <= max_chars {
         return vec![text.trim().to_string()];
     }
@@ -399,7 +322,7 @@ fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
-fn split_sentences(text: &str) -> Vec<String> {
+pub fn split_sentences(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = text.chars().collect();
@@ -426,7 +349,7 @@ fn split_sentences(text: &str) -> Vec<String> {
     out
 }
 
-fn merge_short_chunks(chunks: Vec<String>, min_chars: usize, max_chars: usize) -> Vec<String> {
+pub fn merge_short_chunks(chunks: Vec<String>, min_chars: usize, max_chars: usize) -> Vec<String> {
     if chunks.is_empty() {
         return Vec::new();
     }
@@ -450,7 +373,7 @@ fn merge_short_chunks(chunks: Vec<String>, min_chars: usize, max_chars: usize) -
     merged
 }
 
-fn classify_chunk(text: &str) -> ContentType {
+pub fn classify_chunk(text: &str) -> ContentType {
     if text.is_empty() {
         return ContentType::PlainParagraph;
     }
@@ -486,7 +409,7 @@ fn classify_chunk(text: &str) -> ContentType {
     }
 }
 
-fn is_heading_block(joined: &str, lines: &[String]) -> bool {
+pub fn is_heading_block(joined: &str, lines: &[String]) -> bool {
     let word_count = joined.split_whitespace().count();
     if word_count == 0 || word_count > 10 {
         return false;
@@ -503,7 +426,7 @@ fn is_heading_block(joined: &str, lines: &[String]) -> bool {
     lines.iter().all(|l| is_heading_style(l))
 }
 
-fn is_heading_style(text: &str) -> bool {
+pub fn is_heading_style(text: &str) -> bool {
     let t = text.trim();
     let alpha: String = t.chars().filter(|c| c.is_alphabetic()).collect();
     if alpha.is_empty() {
@@ -541,11 +464,11 @@ fn is_heading_style(text: &str) -> bool {
     false
 }
 
-fn normalize_line(line: &str) -> String {
+pub fn normalize_line(line: &str) -> String {
     line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn is_noise_line(line: &str) -> bool {
+pub fn is_noise_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower.starts_with("copyright ")
         || lower.contains("codewithmosh.com")
@@ -553,24 +476,24 @@ fn is_noise_line(line: &str) -> bool {
         || is_page_marker(line)
 }
 
-fn is_standalone_number(line: &str) -> bool {
+pub fn is_standalone_number(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty() && t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit())
 }
 
-fn is_page_marker(line: &str) -> bool {
+pub fn is_page_marker(line: &str) -> bool {
     if let Some(rest) = line.trim().strip_prefix("ML Engineer Roadmap ") {
         return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
     }
     false
 }
 
-fn is_toc_heading(line: &str) -> bool {
+pub fn is_toc_heading(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower == "table of content" || lower == "table of contents"
 }
 
-fn looks_like_toc_entry(line: &str) -> bool {
+pub fn looks_like_toc_entry(line: &str) -> bool {
     let t = line.trim();
     let mut parts = t.rsplitn(2, ' ');
     let last = parts.next().unwrap_or_default();
@@ -581,7 +504,7 @@ fn looks_like_toc_entry(line: &str) -> bool {
         && rest.split_whitespace().count() <= 8
 }
 
-fn is_bullet_line(line: &str) -> bool {
+pub fn is_bullet_line(line: &str) -> bool {
     let t = line.trim();
     t.starts_with("- ")
         || t.starts_with("* ")
@@ -596,7 +519,7 @@ fn is_bullet_line(line: &str) -> bool {
         || t.starts_with('\u{2043}')
 }
 
-fn is_numbered_line(line: &str) -> bool {
+pub fn is_numbered_line(line: &str) -> bool {
     let t = line.trim();
     let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
     if digits.is_empty() || digits.len() > 3 {
@@ -606,12 +529,12 @@ fn is_numbered_line(line: &str) -> bool {
     matches!(rest.chars().next(), Some('.') | Some(')')) && rest.len() > 2
 }
 
-fn looks_like_sentence(line: &str) -> bool {
+pub fn looks_like_sentence(line: &str) -> bool {
     let words = line.split_whitespace().count();
     words >= 8 || line.ends_with('.') || line.ends_with('!') || line.ends_with('?')
 }
 
-fn merge_bullet_lines(lines: &[String]) -> Vec<String> {
+pub fn merge_bullet_lines(lines: &[String]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::new();
 
     for line in lines {
@@ -632,7 +555,7 @@ fn merge_bullet_lines(lines: &[String]) -> Vec<String> {
     merged
 }
 
-fn pdf_metadata() -> Value {
+pub fn pdf_metadata() -> Value {
     json!({
         "footnotes_captions": [],
         "page_number": null,

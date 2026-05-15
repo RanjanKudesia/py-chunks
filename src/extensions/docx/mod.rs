@@ -3,6 +3,7 @@ pub mod section;
 pub mod semantic;
 pub mod sentence;
 pub mod sliding_window;
+pub mod stream_iter;
 pub mod structural;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
@@ -12,5 +13,6 @@ pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyRe
     sentence::register(m)?;
     semantic::register(m)?;
     sliding_window::register(m)?;
+    stream_iter::register(m)?;
     Ok(())
 }
