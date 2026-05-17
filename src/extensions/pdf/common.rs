@@ -1,5 +1,3 @@
-use serde_json::{json, Value};
-
 pub const MAX_CHUNK_CHARS: usize = 1200;
 pub const MIN_CHUNK_CHARS: usize = 350;
 
@@ -11,13 +9,6 @@ pub enum ContentType {
     Table,
     LongSingleParagraph,
     ShortDisconnectedParagraph,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChunkRecordInput {
-    pub content_type: ContentType,
-    pub content: String,
-    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -42,66 +33,6 @@ impl ContentType {
             ContentType::LongSingleParagraph => "long_single_paragraph",
             ContentType::ShortDisconnectedParagraph => "short_disconnected_paragraph",
         }
-    }
-}
-
-pub fn extract_paragraphs(raw_text: &str) -> Vec<Paragraph> {
-    let mut paragraphs: Vec<Paragraph> = Vec::new();
-    let mut in_toc = false;
-
-    for page_text in split_pages(raw_text) {
-        for block_lines in split_raw_blocks(&page_text) {
-            let clean: Vec<String> = block_lines
-                .iter()
-                .map(|l| normalize_line(l))
-                .filter(|l| !l.is_empty() && !is_noise_line(l))
-                .collect();
-
-            if clean.is_empty() {
-                continue;
-            }
-
-            if is_toc_heading(&clean[0]) {
-                in_toc = true;
-                continue;
-            }
-
-            if in_toc {
-                let real_lines: Vec<String> = clean
-                    .into_iter()
-                    .filter(|l| !looks_like_toc_entry(l) && !is_standalone_number(l))
-                    .collect();
-                if real_lines.is_empty() {
-                    continue;
-                }
-                in_toc = false;
-                if let Some(para) = build_paragraph(real_lines) {
-                    paragraphs.push(para);
-                }
-                continue;
-            }
-
-            if let Some(para) = build_paragraph(clean) {
-                paragraphs.push(para);
-            }
-        }
-    }
-
-    paragraphs
-}
-
-pub fn split_pages(text: &str) -> Vec<String> {
-    let pages: Vec<String> = text
-        .split('\u{000C}')
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .map(String::from)
-        .collect();
-
-    if pages.is_empty() {
-        vec![text.trim().to_string()]
-    } else {
-        pages
     }
 }
 
@@ -349,30 +280,6 @@ pub fn split_sentences(text: &str) -> Vec<String> {
     out
 }
 
-pub fn merge_short_chunks(chunks: Vec<String>, min_chars: usize, max_chars: usize) -> Vec<String> {
-    if chunks.is_empty() {
-        return Vec::new();
-    }
-
-    let soft_max = max_chars + min_chars;
-    let mut merged: Vec<String> = Vec::new();
-
-    for chunk in chunks {
-        if let Some(prev) = merged.last_mut() {
-            if chunk.len() < min_chars {
-                let candidate = format!("{prev}\n{chunk}").trim().to_string();
-                if candidate.len() <= soft_max {
-                    *prev = candidate;
-                    continue;
-                }
-            }
-        }
-        merged.push(chunk);
-    }
-
-    merged
-}
-
 pub fn classify_chunk(text: &str) -> ContentType {
     if text.is_empty() {
         return ContentType::PlainParagraph;
@@ -555,13 +462,3 @@ pub fn merge_bullet_lines(lines: &[String]) -> Vec<String> {
     merged
 }
 
-pub fn pdf_metadata() -> Value {
-    json!({
-        "footnotes_captions": [],
-        "page_number": null,
-        "section_heading": null,
-        "document_metadata": {
-            "source_type": "pdf"
-        },
-    })
-}

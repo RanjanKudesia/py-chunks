@@ -15,7 +15,7 @@ from urllib.request import urlopen
 from .chunkers.docx import chunk_docx, stream_chunk_docx
 from .chunkers.html import chunk_html
 from .chunkers.md import chunk_md
-from .chunkers.pdf import chunk_pdf
+from .chunkers.pdf import chunk_pdf, stream_chunk_pdf
 from .chunkers.pptx import chunk_pptx
 from .chunkers.txt import chunk_txt
 
@@ -30,7 +30,55 @@ _DISPATCH = {
     ".txt": chunk_txt,
 }
 
+_EXT_DOCX = ".docx"
+_EXT_PDF = ".pdf"
+
 _SUPPORTED = ", ".join(sorted(_DISPATCH))
+
+
+class _StreamingFileCleanup:
+    """Iterator wrapper that guarantees temp-file cleanup."""
+
+    def __init__(self, iterator, filepath: str):
+        self._iterator = iterator
+        self._filepath = filepath
+        self._closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._closed:
+            raise StopIteration
+        try:
+            return next(self._iterator)
+        except StopIteration:
+            self.close()
+            raise
+        except Exception:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if os.path.exists(self._filepath):
+                os.unlink(self._filepath)
+        except OSError:
+            # Best-effort cleanup; iterator semantics should still complete.
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    def __del__(self):
+        self.close()
 
 
 def _resolve_chunker(filename: str):
@@ -52,7 +100,7 @@ def _run_chunker(
     sentences_per_chunk: int,
     paragraphs_per_page: int,
 ):
-    if chunker is chunk_docx:
+    if chunker in {chunk_docx, chunk_pdf}:
         return chunker(
             file_path,
             mode=mode,
@@ -67,7 +115,7 @@ def _run_chunker(
 def get_chunks_from_path(
     file_path: str,
     *,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -108,7 +156,7 @@ def get_chunks_from_bytes(
     data: bytes,
     filename: str,
     *,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -162,7 +210,7 @@ def get_chunks_from_fileobj(
     file_obj: Any,
     filename: str | None = None,
     *,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -195,7 +243,7 @@ def get_chunks_from_fileobj(
 def get_chunks_from_upload(
     upload_file: Any,
     *,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -248,7 +296,7 @@ def get_chunks_from_s3_presigned_url(
     filename: str | None = None,
     timeout: int = 60,
     *,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -276,29 +324,24 @@ def get_chunks_from_s3_presigned_url(
         paragraphs_per_page=paragraphs_per_page,
     )
 
-    return get_chunks_from_bytes(
-        data,
-        inferred_name,
-        mode=mode,
-        window_size=window_size,
-        overlap=overlap,
-        sentences_per_chunk=sentences_per_chunk,
-        paragraphs_per_page=paragraphs_per_page,
-    )
-
 
 def stream_chunks_from_path(
     file_path: str,
     *,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Stream chunks from any supported document at a local path.
 
-    Supported extensions: .docx (structural mode only currently)
+    Supported extensions: .docx, .pdf
 
     Args:
         file_path: Path to the document file.
-        mode: Chunking mode (currently only "structural" supported for streaming).
+        mode: Chunking mode. DOCX supports "default" and "structural"
+            (equivalent behavior); PDF supports all current PDF modes.
 
     Returns:
         Iterator that yields chunk dicts with keys: content, content_type, metadata.
@@ -312,8 +355,17 @@ def stream_chunks_from_path(
 
     _, ext = _resolve_chunker(file_path)
 
-    if ext == ".docx":
+    if ext == _EXT_DOCX:
         return stream_chunk_docx(file_path, mode=mode)
+    if ext == _EXT_PDF:
+        return stream_chunk_pdf(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     raise NotImplementedError(f"Streaming not yet supported for {ext} files")
 
@@ -322,7 +374,11 @@ def stream_chunks_from_bytes(
     data: bytes,
     filename: str,
     *,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Stream chunks from raw bytes (e.g. an API file upload).
 
@@ -330,13 +386,14 @@ def stream_chunks_from_bytes(
     then deletes the temp file. The original filename is only used for
     extension detection — it is never written to disk under that name.
 
-    Supported extensions: .docx (structural mode only currently)
+    Supported extensions: .docx, .pdf
 
     Args:
         data:     Raw bytes of the document.
         filename: Original filename (e.g. ``"report.docx"``). Used to
                   determine the file type.
-        mode: Chunking mode (currently only "structural" supported for streaming).
+        mode: Chunking mode. DOCX supports "default" and "structural"
+            (equivalent behavior); PDF supports all current PDF modes.
 
     Returns:
         Iterator that yields chunk dicts with keys: content, content_type, metadata.
@@ -353,26 +410,19 @@ def stream_chunks_from_bytes(
         tmp.write(data)
         tmp_path = tmp.name
 
-    # For streaming, we can't automatically delete the file because the iterator
-    # needs to read from it. Return a wrapper that will clean up when exhausted.
-    class StreamingFileCleanup:
-        def __init__(self, iterator, filepath):
-            self.iterator = iterator
-            self.filepath = filepath
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            try:
-                return next(self.iterator)
-            except StopIteration:
-                os.unlink(self.filepath)
-                raise
-
-    if ext == ".docx":
+    if ext == _EXT_DOCX:
         iterator = stream_chunk_docx(tmp_path, mode=mode)
-        return StreamingFileCleanup(iterator, tmp_path)
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_PDF:
+        iterator = stream_chunk_pdf(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
 
     raise NotImplementedError(f"Streaming not yet supported for {ext} files")
 
@@ -381,7 +431,11 @@ def stream_chunks_from_fileobj(
     file_obj: Any,
     filename: str | None = None,
     *,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Stream chunks from a file-like object (open file, BytesIO, etc.)."""
     inferred_name = filename or getattr(file_obj, "name", None)
@@ -396,13 +450,25 @@ def stream_chunks_from_fileobj(
     elif not isinstance(data, bytes):
         raise TypeError("file_obj.read() must return bytes or str")
 
-    return stream_chunks_from_bytes(data, inferred_name, mode=mode)
+    return stream_chunks_from_bytes(
+        data,
+        inferred_name,
+        mode=mode,
+        window_size=window_size,
+        overlap=overlap,
+        sentences_per_chunk=sentences_per_chunk,
+        paragraphs_per_page=paragraphs_per_page,
+    )
 
 
 def stream_chunks_from_upload(
     upload_file: Any,
     *,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Stream chunks from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
@@ -411,7 +477,15 @@ def stream_chunks_from_upload(
 
     inner_file = getattr(upload_file, "file", None)
     if inner_file is not None and hasattr(inner_file, "read"):
-        return stream_chunks_from_fileobj(inner_file, filename=filename, mode=mode)
+        return stream_chunks_from_fileobj(
+            inner_file,
+            filename=filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(upload_file, "read"):
         data = upload_file.read()
@@ -425,7 +499,15 @@ def stream_chunks_from_upload(
             data = bytes(data)
         elif not isinstance(data, bytes):
             raise TypeError("upload_file.read() must return bytes or str")
-        return stream_chunks_from_bytes(data, filename, mode=mode)
+        return stream_chunks_from_bytes(
+            data,
+            filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     raise TypeError("upload_file must provide .file.read() or .read()")
 
@@ -435,7 +517,11 @@ def stream_chunks_from_s3_presigned_url(
     filename: str | None = None,
     timeout: int = 60,
     *,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Stream chunks from a document downloaded via pre-signed URL."""
     inferred_name = filename
@@ -449,27 +535,39 @@ def stream_chunks_from_s3_presigned_url(
     with urlopen(url, timeout=timeout) as response:
         data = response.read()
 
-    return stream_chunks_from_bytes(data, inferred_name, mode=mode)
+    return stream_chunks_from_bytes(
+        data,
+        inferred_name,
+        mode=mode,
+        window_size=window_size,
+        overlap=overlap,
+        sentences_per_chunk=sentences_per_chunk,
+        paragraphs_per_page=paragraphs_per_page,
+    )
 
 
 def stream_chunks(
     source: Any,
     *,
     filename: str | None = None,
-    mode: str = "structural",
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
 ) -> Any:
     """Unified streaming chunking entrypoint across paths, bytes, file objects, uploads, and URLs.
 
     Returns an iterator that yields chunks one at a time without buffering
     the entire result list in memory. Useful for large documents.
 
-    Currently supports streaming for DOCX files with structural mode.
-    Other modes and formats will be available in future updates.
+    Currently supports streaming for DOCX and PDF files.
 
     Args:
         source: File path, URL, bytes, file-like object, or upload object.
         filename: Original filename (required for bytes/fileobj/upload sources).
-        mode: Chunking mode (currently "structural" only for streaming).
+        mode: Chunking mode. DOCX supports "default" and "structural"
+            (equivalent behavior); PDF supports all current PDF modes.
 
     Returns:
         Iterator that yields chunk dicts with keys: content, content_type, metadata.
@@ -488,8 +586,19 @@ def stream_chunks(
                 source_path,
                 filename=filename,
                 mode=mode,
+                window_size=window_size,
+                overlap=overlap,
+                sentences_per_chunk=sentences_per_chunk,
+                paragraphs_per_page=paragraphs_per_page,
             )
-        return stream_chunks_from_path(source_path, mode=mode)
+        return stream_chunks_from_path(
+            source_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if isinstance(source, memoryview):
         source = source.tobytes()
@@ -500,13 +609,36 @@ def stream_chunks(
     if isinstance(source, bytes):
         if not filename:
             raise ValueError("filename is required when source is bytes")
-        return stream_chunks_from_bytes(source, filename, mode=mode)
+        return stream_chunks_from_bytes(
+            source,
+            filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(source, "filename"):
-        return stream_chunks_from_upload(source, mode=mode)
+        return stream_chunks_from_upload(
+            source,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     if hasattr(source, "read"):
-        return stream_chunks_from_fileobj(source, filename=filename, mode=mode)
+        return stream_chunks_from_fileobj(
+            source,
+            filename=filename,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
 
     raise TypeError(
         "Unsupported source type. Use path/URL, bytes, file-like object, or upload object."
@@ -517,7 +649,7 @@ def get_chunks(
     source: Any,
     *,
     filename: str | None = None,
-    mode: str = "structural",
+    mode: str = "default",
     window_size: int = 3,
     overlap: int = 1,
     sentences_per_chunk: int = 3,
@@ -608,6 +740,7 @@ __all__ = [
     "chunk_html",
     "chunk_md",
     "chunk_pdf",
+    "stream_chunk_pdf",
     "chunk_pptx",
     "chunk_txt",
 ]

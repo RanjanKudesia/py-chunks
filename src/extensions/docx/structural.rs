@@ -10,7 +10,6 @@ use quick_xml::Reader;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufReader, Cursor, Read};
-use std::sync::Arc;
 use std::time::Instant;
 use zip::ZipArchive;
 

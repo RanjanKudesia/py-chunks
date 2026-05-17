@@ -39,7 +39,8 @@ for chunk in chunks:
 By default, DOCX files use structural chunking. Pass `mode` to switch strategies:
 
 ```python
-chunks = get_chunks("file.docx", mode="structural")   # default
+chunks = get_chunks("file.docx", mode="default")      # default
+chunks = get_chunks("file.docx", mode="structural")   # equivalent to default
 chunks = get_chunks("file.docx", mode="section")
 chunks = get_chunks("file.docx", mode="semantic")
 chunks = get_chunks("file.docx", mode="sliding_window")
@@ -115,8 +116,10 @@ chunks = get_chunks("file.docx", mode="page_aware",
 # page_break_type values: "explicit", "section", "estimated"
 ```
 
-Note: Chunking modes currently apply to DOCX only. PDF, PPTX, HTML,
-MD, and TXT use structural chunking by default.
+Note: Mode-based chunking applies to DOCX and PDF. For both formats,
+mode="default" is the API default. DOCX treats "default" and
+"structural" as equivalent behavior. PPTX, HTML, MD, and TXT currently
+use format-specific structural/default chunking without additional modes.
 
 ## Supported Sources
 
@@ -192,9 +195,13 @@ chunks = get_chunks_from_s3_presigned_url(url)
 
 ### Universal Entry Point
 
-#### `get_chunks(source, *, filename=None, mode="structural", window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15) -> list[dict]`
+#### `get_chunks(source, *, filename=None, mode="default", window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15) -> list[dict]`
 
 Accepts any source type and automatically detects format and dispatch target.
+
+#### `stream_chunks(source, *, filename=None, mode="default", window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15) -> Iterator[dict]`
+
+Streaming equivalent of `get_chunks()` with the same default mode semantics.
 
 **Parameters:**
 - `source`: `str`, `PathLike`, `bytes`, file-like object, upload object, or URL
