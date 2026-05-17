@@ -11,7 +11,7 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
 - **Framework Agnostic**: Local files, bytes, file-like objects, FastAPI uploads, S3 presigned URLs, or raw streams
 - **Consistent Output Schema**: Structured chunks with content type, section headings, and format-specific metadata
 - **High Performance**: Rust parsing engine with millisecond latency per document
-- **Production Ready**: Full type hints, comprehensive error handling, 15 integration tests, Pylint 10.00/10
+- **Production Ready**: Full type hints, comprehensive error handling, extensive test coverage, Pylint 10.00/10
 
 ## Installation
 
@@ -33,6 +33,93 @@ for chunk in chunks:
     print(chunk["content"])
     print(chunk["content_type"])  # "heading", "plain_paragraph", etc.
 ```
+
+## Chunking Modes (DOCX)
+
+By default, DOCX files use structural chunking. Pass `mode` to switch strategies:
+
+```python
+chunks = get_chunks("file.docx", mode="default")      # default
+chunks = get_chunks("file.docx", mode="structural")   # equivalent to default
+chunks = get_chunks("file.docx", mode="section")
+chunks = get_chunks("file.docx", mode="semantic")
+chunks = get_chunks("file.docx", mode="sliding_window")
+chunks = get_chunks("file.docx", mode="sentence")
+chunks = get_chunks("file.docx", mode="page_aware")
+```
+
+### structural (default)
+Splits by document structure — headings, paragraphs, tables, lists.
+Each element becomes its own chunk with a typed content_type.
+content_type values: heading, plain_paragraph, table, bullet_list,
+code_block
+
+### section
+Groups everything under a heading into one chunk including all
+sub-paragraphs, lists, and tables until the next heading of equal
+or higher level. Sections exceeding 2000 chars are split automatically.
+```python
+chunks = get_chunks("file.docx", mode="section")
+# chunk["metadata"] contains: section_heading, section_level, heading_path
+```
+
+### semantic
+Groups paragraphs by topic continuity using pure heuristics — no
+ML models or external dependencies.
+Signals used (in priority order):
+- Reference continuity: paragraph starts with This/It/They/These
+- Transition keywords: However/Therefore/In contrast -> new chunk
+- Keyword overlap: shared significant words -> merge
+- Short paragraph merging: paragraphs under 80 chars merged with next
+- Max chunk size: 1500 chars hard limit
+```python
+chunks = get_chunks("file.docx", mode="semantic")
+# chunk["metadata"] contains: paragraph_count, merge_reason
+```
+
+### sliding_window
+Fixed-size overlapping windows of paragraphs. Useful for RAG with
+overlap context.
+```python
+chunks = get_chunks("file.docx", mode="sliding_window",
+                    window_size=3, overlap=1)
+# defaults: window_size=3, overlap=1
+# chunk["metadata"] contains: window_size, overlap, window_index,
+#                              paragraph_indices
+```
+
+### sentence
+Splits content into sentence-level chunks grouped by
+sentences_per_chunk. Sentence boundaries detected without NLP
+libraries using punctuation rules. Handles common abbreviations
+(Mr. Dr. vs. etc.) without false splits.
+```python
+chunks = get_chunks("file.docx", mode="sentence",
+                    sentences_per_chunk=3)
+# defaults: sentences_per_chunk=3
+# chunk["metadata"] contains: sentences_per_chunk,
+#                              actual_sentence_count, chunk_index,
+#                              source_paragraph_index
+```
+
+### page_aware
+Approximates page boundaries using 3 signals in priority order:
+1. Explicit page breaks (w:pageBreak) — most reliable
+2. Section breaks (w:sectPr) — reliable
+3. Paragraph count approximation — fallback (~15 per page)
+```python
+chunks = get_chunks("file.docx", mode="page_aware",
+                    paragraphs_per_page=15)
+# defaults: paragraphs_per_page=15
+# chunk["metadata"] contains: page_number, page_break_type,
+#                              paragraph_count
+# page_break_type values: "explicit", "section", "estimated"
+```
+
+Note: Mode-based chunking applies to DOCX and PDF. For both formats,
+mode="default" is the API default. DOCX treats "default" and
+"structural" as equivalent behavior. PPTX, HTML, MD, and TXT currently
+use format-specific structural/default chunking without additional modes.
 
 ## Supported Sources
 
@@ -108,9 +195,13 @@ chunks = get_chunks_from_s3_presigned_url(url)
 
 ### Universal Entry Point
 
-#### `get_chunks(source, *, filename: str | None = None) -> list[dict]`
+#### `get_chunks(source, *, filename=None, mode="default", window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15) -> list[dict]`
 
 Accepts any source type and automatically detects format and dispatch target.
+
+#### `stream_chunks(source, *, filename=None, mode="default", window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15) -> Iterator[dict]`
+
+Streaming equivalent of `get_chunks()` with the same default mode semantics.
 
 **Parameters:**
 - `source`: `str`, `PathLike`, `bytes`, file-like object, upload object, or URL
@@ -173,6 +264,11 @@ Each format-specific chunker returns a tuple: `(list[dict], dict)` where the sec
 - `code_block` – Code or preformatted text
 - `long_single_paragraph` – Paragraph > 900 characters
 - `short_disconnected_paragraph` – Paragraph < 90 characters
+- `section` – Heading-scoped grouped content
+- `semantic` – Heuristic topic-continuity grouped content
+- `sliding_window` – Fixed-size overlapping paragraph windows
+- `sentence` – Sentence-count grouped content
+- `page_aware` – Page boundary grouped content
 
 ## Architecture
 
@@ -217,7 +313,7 @@ Each format-specific chunker returns a tuple: `(list[dict], dict)` where the sec
 - **Single Responsibility**: Each format parser handles only its format
 - **Framework Agnostic**: Python layer abstracts source complexity; Rust layer is format-specific
 - **Temp File Strategy**: Bytes → temp file → Rust → auto-cleanup provides safety without complex FFI
-- **Minimal Dependencies**: Requests for S3 URLs only; all parsing is Rust-compiled
+- **Zero Dependencies**: Pure Python stdlib; all parsing is Rust-compiled
 
 ## Development & Testing
 

@@ -886,7 +886,348 @@ fn recursive_char_chunks(text: &str, max_chars: usize, overlap: usize) -> Vec<St
     out
 }
 
+#[pyclass]
+pub struct DocxStructuralIterator {
+    elements: Vec<DocumentElement>,
+    doc_metadata: Value,
+    element_index: usize,
+    // Grouping state - these accumulate as we process elements
+    section_heading: Option<String>,
+    section_parts: Vec<DocumentElement>,
+    outside_short_parts: Vec<String>,
+    pending_notes: Vec<String>,
+    done: bool,
+}
+
+impl DocxStructuralIterator {
+    fn flush_one_short(&mut self) -> Option<ChunkRecordInput> {
+        if self.outside_short_parts.is_empty() {
+            return None;
+        }
+        let merged = self.outside_short_parts.join(" ").trim().to_string();
+        self.outside_short_parts.clear();
+        if !merged.is_empty() {
+            let items = recursive_char_chunks(&merged, 700, 100);
+            if !items.is_empty() {
+                let first = items[0].clone();
+                for item in items.iter().skip(1) {
+                    self.outside_short_parts.push(item.clone());
+                }
+                let notes = std::mem::take(&mut self.pending_notes);
+                return Some(ChunkRecordInput {
+                    content_type: ContentType::ShortDisconnectedParagraph,
+                    content: first,
+                    metadata: base_chunk_metadata(None, &notes, &self.doc_metadata),
+                });
+            }
+        }
+        None
+    }
+
+    fn flush_one_section(&mut self) -> Option<ChunkRecordInput> {
+        if self.section_parts.is_empty() && self.section_heading.is_none() {
+            return None;
+        }
+
+        let heading = self.section_heading.take();
+        let mut has_paragraph = false;
+        let mut has_bullets = false;
+        let mut has_image = false;
+        let mut lines = Vec::new();
+        let mut shorts = Vec::new();
+
+        for part in self.section_parts.iter() {
+            match part.content_type {
+                ContentType::BulletNumberedList => {
+                    has_bullets = true;
+                    lines.push(part.text.clone());
+                }
+                ContentType::HeadingSection => {
+                    lines.push(part.text.clone());
+                }
+                ContentType::ShortDisconnectedParagraph => {
+                    has_paragraph = true;
+                    shorts.push(part.text.clone());
+                }
+                ContentType::Image => {
+                    has_image = true;
+                    lines.push(part.text.clone());
+                }
+                _ => {
+                    has_paragraph = true;
+                    lines.push(part.text.clone());
+                }
+            }
+        }
+
+        if !shorts.is_empty() {
+            lines.push(shorts.join(" "));
+        }
+
+        self.section_parts.clear();
+
+        let combined = lines.join("\n").trim().to_string();
+        if !combined.is_empty() {
+            let content_type = if heading.is_some() && (has_paragraph || has_bullets || has_image) {
+                ContentType::MixedContent
+            } else {
+                ContentType::HeadingSection
+            };
+            let notes = std::mem::take(&mut self.pending_notes);
+            return Some(ChunkRecordInput {
+                content_type,
+                content: combined,
+                metadata: base_chunk_metadata(heading, &notes, &self.doc_metadata),
+            });
+        }
+
+        None
+    }
+
+    fn next_chunk(&mut self) -> Option<ChunkRecordInput> {
+        if self.done {
+            return None;
+        }
+
+        loop {
+            if self.element_index >= self.elements.len() {
+                // Done with elements, flush any pending state
+                if let Some(chunk) = self.flush_one_short() {
+                    return Some(chunk);
+                }
+                if let Some(chunk) = self.flush_one_section() {
+                    return Some(chunk);
+                }
+                self.done = true;
+                return None;
+            }
+
+            // Clone the element to avoid borrow conflicts
+            let element = self.elements[self.element_index].clone();
+
+            match element.content_type {
+                ContentType::HeaderFooter => {
+                    self.element_index += 1;
+                }
+                ContentType::FootnoteCaption => {
+                    self.pending_notes.push(element.text.clone());
+                    self.element_index += 1;
+                }
+                ContentType::HeadingSection => {
+                    // Flush any pending state before starting new section
+                    if let Some(chunk) = self.flush_one_short() {
+                        return Some(chunk);
+                    }
+                    if let Some(chunk) = self.flush_one_section() {
+                        return Some(chunk);
+                    }
+                    // Start new section
+                    self.section_heading = Some(element.text.clone());
+                    self.section_parts.push(element);
+                    self.element_index += 1;
+                }
+                ContentType::BulletNumberedList => {
+                    // Collect all consecutive bullets
+                    let mut bullets = vec![element.text.clone()];
+                    let mut j = self.element_index + 1;
+                    while j < self.elements.len()
+                        && self.elements[j].content_type == ContentType::BulletNumberedList
+                    {
+                        bullets.push(self.elements[j].text.clone());
+                        j += 1;
+                    }
+                    let list_text = bullets.join(
+                        "
+",
+                    );
+
+                    if self.section_heading.is_some() {
+                        // Add to current section
+                        self.section_parts.push(DocumentElement {
+                            content_type: ContentType::BulletNumberedList,
+                            text: list_text,
+                        });
+                        self.element_index = j;
+                    } else {
+                        // Standalone bullet list
+                        if let Some(chunk) = self.flush_one_short() {
+                            return Some(chunk);
+                        }
+                        let notes = std::mem::take(&mut self.pending_notes);
+                        self.element_index = j;
+                        return Some(ChunkRecordInput {
+                            content_type: ContentType::BulletNumberedList,
+                            content: list_text,
+                            metadata: base_chunk_metadata(None, &notes, &self.doc_metadata),
+                        });
+                    }
+                }
+                ContentType::Table => {
+                    if let Some(chunk) = self.flush_one_short() {
+                        return Some(chunk);
+                    }
+                    if let Some(chunk) = self.flush_one_section() {
+                        return Some(chunk);
+                    }
+                    let notes = std::mem::take(&mut self.pending_notes);
+                    self.element_index += 1;
+                    return Some(ChunkRecordInput {
+                        content_type: ContentType::Table,
+                        content: element.text.clone(),
+                        metadata: base_chunk_metadata(None, &notes, &self.doc_metadata),
+                    });
+                }
+                ContentType::CodeBlock => {
+                    if let Some(chunk) = self.flush_one_short() {
+                        return Some(chunk);
+                    }
+                    if let Some(chunk) = self.flush_one_section() {
+                        return Some(chunk);
+                    }
+                    let notes = std::mem::take(&mut self.pending_notes);
+                    self.element_index += 1;
+                    return Some(ChunkRecordInput {
+                        content_type: ContentType::CodeBlock,
+                        content: element.text.clone(),
+                        metadata: base_chunk_metadata(None, &notes, &self.doc_metadata),
+                    });
+                }
+                ContentType::ShortDisconnectedParagraph => {
+                    if self.section_heading.is_some() {
+                        self.section_parts.push(element);
+                        self.element_index += 1;
+                    } else {
+                        self.outside_short_parts.push(element.text.clone());
+                        self.element_index += 1;
+                    }
+                }
+                ContentType::PlainParagraph
+                | ContentType::LongSingleParagraph
+                | ContentType::Image => {
+                    if self.section_heading.is_some() {
+                        self.section_parts.push(element);
+                        self.element_index += 1;
+                    } else {
+                        // Handle outside section content
+                        if let Some(chunk) = self.flush_one_short() {
+                            return Some(chunk);
+                        }
+
+                        // Split large paragraphs by semantic chunks
+                        let split = semantic_chunks(&element.text, 900);
+                        if !split.is_empty() {
+                            let first = split[0].clone();
+                            for item in split.iter().skip(1) {
+                                self.outside_short_parts.push(item.clone());
+                            }
+                            let notes = std::mem::take(&mut self.pending_notes);
+                            self.element_index += 1;
+                            return Some(ChunkRecordInput {
+                                content_type: element.content_type,
+                                content: first,
+                                metadata: base_chunk_metadata(None, &notes, &self.doc_metadata),
+                            });
+                        }
+
+                        self.element_index += 1;
+                    }
+                }
+                ContentType::MixedContent => {
+                    self.element_index += 1;
+                }
+            }
+        }
+    }
+}
+
+#[pymethods]
+impl DocxStructuralIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if let Some(chunk) = self.next_chunk() {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", &chunk.content)?;
+            dict.set_item("content_type", chunk.content_type.as_str())?;
+            dict.set_item("metadata", pythonize(py, &chunk.metadata)?)?;
+            Ok(Some(dict.into_any().unbind()))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+#[pyfunction]
+fn chunk_docx_structural_stream(file_path: &str) -> PyResult<DocxStructuralIterator> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let cursor = Cursor::new(&bytes);
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid DOCX zip: {e}")))?;
+
+    // Extract document.xml bytes
+    let mut document_xml_file = archive
+        .by_name("word/document.xml")
+        .map_err(|_| PyRuntimeError::new_err("word/document.xml not found".to_string()))?;
+
+    let mut xml_bytes = Vec::new();
+    std::io::Read::read_to_end(&mut document_xml_file, &mut xml_bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to read document.xml: {e}")))?;
+    drop(document_xml_file);
+
+    // Extract metadata (small files, ok to read once)
+    let footnotes_xml = read_zip_entry(&mut archive, "word/footnotes.xml", MAX_DOCX_AUX_XML_BYTES)
+        .map_err(|e| PyRuntimeError::new_err(e))?;
+    let header_xml = read_first_prefixed_entry(&mut archive, "word/header", MAX_DOCX_AUX_XML_BYTES)
+        .map_err(|e| PyRuntimeError::new_err(e))?;
+    let footer_xml = read_first_prefixed_entry(&mut archive, "word/footer", MAX_DOCX_AUX_XML_BYTES)
+        .map_err(|e| PyRuntimeError::new_err(e))?;
+    let image_count = count_prefixed_entries(&mut archive, "word/media/")
+        .map_err(|e| PyRuntimeError::new_err(e))?;
+
+    // Build metadata
+    let doc_metadata = json!({
+        "header_text": header_xml.as_ref().and_then(|x| extract_text_from_xml(x).ok()),
+        "footer_text": footer_xml.as_ref().and_then(|x| extract_text_from_xml(x).ok()),
+        "image_count": image_count,
+    });
+
+    let mut pending_notes = Vec::new();
+    if let Some(footnote_xml) = footnotes_xml {
+        for ft in extract_footnotes(&footnote_xml) {
+            pending_notes.push(ft);
+        }
+    }
+
+    // Parse document.xml into structural elements
+    let cursor = Cursor::new(xml_bytes);
+    let elements = parse_document_xml_elements_streaming(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse document.xml: {e}")))?;
+
+    Ok(DocxStructuralIterator {
+        elements,
+        doc_metadata,
+        element_index: 0,
+        section_heading: None,
+        section_parts: Vec::new(),
+        outside_short_parts: Vec::new(),
+        pending_notes,
+        done: false,
+    })
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_structural_stream, m)?)?;
+    m.add_class::<DocxStructuralIterator>()?;
     Ok(())
 }
