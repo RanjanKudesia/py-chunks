@@ -40,17 +40,16 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # required for trusted publishing
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           merge-multiple: true
-          path: target/wheels
+          path: dist  # pypa action expects 'dist' by default
 
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
-        with:
-          command: upload
-          args: --non-interactive --skip-existing target/wheels/*
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
