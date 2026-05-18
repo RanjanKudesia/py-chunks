@@ -267,32 +267,134 @@ fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize,
 
 static PDFIUM_LIBRARY_PATH: OnceLock<Option<String>> = OnceLock::new();
 
+fn site_packages_candidates(prefix: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    if cfg!(windows) {
+        candidates.push(prefix.join("Lib/site-packages/pypdfium2_raw"));
+        candidates.push(prefix.join("Lib/site-packages"));
+    } else {
+        candidates.push(prefix.join("lib/python3.13/site-packages/pypdfium2_raw"));
+        candidates.push(prefix.join("lib/python3.13/site-packages"));
+        candidates.push(prefix.join("lib/python3.12/site-packages/pypdfium2_raw"));
+        candidates.push(prefix.join("lib/python3.12/site-packages"));
+        candidates.push(prefix.join("lib/python3.11/site-packages/pypdfium2_raw"));
+        candidates.push(prefix.join("lib/python3.11/site-packages"));
+    }
+
+    candidates
+}
+
+fn library_names() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "pdfium.dll",
+            "libpdfium.dll",
+            "pdfium_x64.dll",
+            "pdfium_x86.dll",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &["libpdfium.dylib"]
+    } else {
+        &["libpdfium.so", "pdfium.so"]
+    }
+}
+
+fn add_candidate_file(candidates: &mut Vec<String>, dir: std::path::PathBuf) {
+    for name in library_names() {
+        let path = dir.join(name);
+        if path.exists() {
+            candidates.push(path.to_string_lossy().to_string());
+        }
+    }
+}
+
+fn add_library_search_path(dir: &std::path::Path) {
+    if let Some(dir_str) = dir.to_str() {
+        if cfg!(windows) {
+            if let Ok(existing) = std::env::var("PATH") {
+                let updated = format!("{};{}", dir_str, existing);
+                std::env::set_var("PATH", updated);
+            } else {
+                std::env::set_var("PATH", dir_str);
+            }
+        } else if cfg!(target_os = "macos") {
+            if let Ok(existing) = std::env::var("DYLD_LIBRARY_PATH") {
+                let updated = format!("{}:{}", dir_str, existing);
+                std::env::set_var("DYLD_LIBRARY_PATH", updated);
+            } else {
+                std::env::set_var("DYLD_LIBRARY_PATH", dir_str);
+            }
+        } else if let Ok(existing) = std::env::var("LD_LIBRARY_PATH") {
+            let updated = format!("{}:{}", dir_str, existing);
+            std::env::set_var("LD_LIBRARY_PATH", updated);
+        } else {
+            std::env::set_var("LD_LIBRARY_PATH", dir_str);
+        }
+    }
+}
+
 fn resolve_pdfium_library_path() -> Option<String> {
     PDFIUM_LIBRARY_PATH
         .get_or_init(|| {
-            let mut candidates = vec![
-                std::env::var("VIRTUAL_ENV")
-                    .map(|v| {
-                        format!(
-                            "{}/lib/python3.13/site-packages/pypdfium2_raw/libpdfium.dylib",
-                            v
-                        )
-                    })
-                    .unwrap_or_default(),
-                "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pypdfium2_raw/libpdfium.dylib".to_string(),
-                "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib".to_string(),
-                "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pypdfium2_raw/libpdfium.dylib".to_string(),
-                "/usr/local/lib/libpdfium.dylib".to_string(),
-                "/usr/lib/libpdfium.dylib".to_string(),
-            ];
+            let mut candidates = Vec::new();
 
-            if std::path::Path::new("/opt/homebrew/opt/pdfium/lib/libpdfium.dylib").exists() {
-                candidates.push("/opt/homebrew/opt/pdfium/lib/libpdfium.dylib".to_string());
+            if let Ok(explicit) = std::env::var("PDFIUM_LIBRARY_PATH") {
+                if !explicit.trim().is_empty() && std::path::Path::new(&explicit).exists() {
+                    candidates.push(explicit);
+                }
             }
 
-            candidates.into_iter().find(|path| {
-                !path.is_empty() && std::path::Path::new(path).exists()
-            })
+            for prefix_var in ["VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME"] {
+                if let Ok(prefix) = std::env::var(prefix_var) {
+                    let prefix_path = std::path::PathBuf::from(prefix);
+                    for dir in site_packages_candidates(&prefix_path) {
+                        add_candidate_file(&mut candidates, dir);
+                    }
+                }
+            }
+
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(prefix) = exe.parent().and_then(|p| p.parent()) {
+                    for dir in site_packages_candidates(prefix) {
+                        add_candidate_file(&mut candidates, dir);
+                    }
+                }
+            }
+
+            if cfg!(target_os = "macos") {
+                for path in [
+                    "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/pypdfium2_raw/libpdfium.dylib",
+                    "/Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/pypdfium2_raw/libpdfium.dylib",
+                    "/Library/Frameworks/Python.framework/Versions/3.11/lib/python3.11/site-packages/pypdfium2_raw/libpdfium.dylib",
+                    "/usr/local/lib/libpdfium.dylib",
+                    "/usr/lib/libpdfium.dylib",
+                    "/opt/homebrew/opt/pdfium/lib/libpdfium.dylib",
+                ] {
+                    if std::path::Path::new(path).exists() {
+                        candidates.push(path.to_string());
+                    }
+                }
+            }
+
+            if cfg!(windows) {
+                for path in [
+                    "C:\\Program Files\\pdfium\\pdfium.dll",
+                    "C:\\Program Files\\pypdfium2\\pdfium.dll",
+                ] {
+                    if std::path::Path::new(path).exists() {
+                        candidates.push(path.to_string());
+                    }
+                }
+
+                if let Ok(path_env) = std::env::var("PATH") {
+                    for dir in std::env::split_paths(&path_env) {
+                        add_candidate_file(&mut candidates, dir);
+                    }
+                }
+            }
+
+            candidates.into_iter().find(|path| !path.is_empty())
         })
         .clone()
 }
@@ -300,13 +402,7 @@ fn resolve_pdfium_library_path() -> Option<String> {
 pub(super) fn get_pdfium() -> Result<Pdfium, String> {
     if let Some(path) = resolve_pdfium_library_path() {
         if let Some(parent) = std::path::Path::new(&path).parent() {
-            if let Some(parent_str) = parent.to_str() {
-                let mut dyld_path = parent_str.to_string();
-                if let Ok(existing) = std::env::var("DYLD_LIBRARY_PATH") {
-                    dyld_path = format!("{}:{}", dyld_path, existing);
-                }
-                std::env::set_var("DYLD_LIBRARY_PATH", &dyld_path);
-            }
+            add_library_search_path(parent);
         }
 
         if let Ok(bindings) = Pdfium::bind_to_library(&path) {
@@ -318,7 +414,7 @@ pub(super) fn get_pdfium() -> Result<Pdfium, String> {
         .map(|b| Pdfium::new(b))
         .map_err(|e| {
             format!(
-                "PDFium not found. Install with: pip install pypdfium2. Error: {}",
+                "PDFium native library not found or could not be loaded. The py-chunks wheel expects pypdfium2 to supply a native PDFium binary automatically. If this still fails, verify that the installed pypdfium2 package is intact and that your environment has access to the bundled pdfium library. On Windows, ensure pdfium.dll is present on PATH. Loader error: {}",
                 e
             )
         })

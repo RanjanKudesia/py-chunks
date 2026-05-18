@@ -21,6 +21,17 @@ pip install py-chunks
 
 **Requirements**: Python 3.9+
 
+### Windows PDF support
+
+PDF chunking uses the native PDFium library. The published wheel depends on `pypdfium2`, which supplies PDFium automatically.
+
+On Windows, if you still see an error like `PDFium native library not found`, make sure:
+
+- the environment is installing the published wheel and its dependencies normally
+- `pdfium.dll` is available on `PATH` if your environment is using a system PDFium
+
+If you bundle your own PDFium DLL, place it next to the executable or add its folder to `PATH` before running your app.
+
 ## Quick Start
 
 ```python
