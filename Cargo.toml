@@ -1,6 +1,6 @@
 [package]
-name = "py_chunks_rust"
-version = "0.1.4"
+name = "py_chunks"
+version = "0.1.2"
 edition = "2021"
 
 [lib]
