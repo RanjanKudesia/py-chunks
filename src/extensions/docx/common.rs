@@ -1,0 +1,897 @@
+//! Shared XML helpers and a unified DOCX paragraph parser used by every
+//! DOCX mode.
+//!
+//! Step A.1 of the parser unification moved `qname_eq`, `push_text` and
+//! `collapse_whitespace` here. Step A.2 adds a single
+//! `parse_docx_indexed_paragraphs` function that replaces the previously
+//! duplicated walkers in `sliding_window.rs` and `sentence.rs`.
+
+use std::io::{BufReader, Cursor, Read};
+
+use quick_xml::events::Event;
+use quick_xml::name::QName;
+use quick_xml::Reader;
+use zip::ZipArchive;
+
+/// True when `name` matches `expected`, ignoring any XML namespace prefix
+/// (e.g. matches `w:p` against `b"p"` and a bare `p` against `b"p"`).
+pub(super) fn qname_eq(name: QName<'_>, expected: &[u8]) -> bool {
+    let n = name.as_ref();
+    n == expected || n.rsplit(|b| *b == b':').next() == Some(expected)
+}
+
+/// Append `piece` to `target`, trimming whitespace and inserting a single
+/// space separator when both sides are non-empty. Used to stitch the run
+/// fragments inside a paragraph back into a single string.
+pub(super) fn push_text(target: &mut String, piece: &str) {
+    let trimmed = piece.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !target.is_empty() {
+        target.push(' ');
+    }
+    target.push_str(trimmed);
+}
+
+/// Collapse runs of whitespace (including newlines/tabs) into single spaces
+/// and trim the result. Mirrors the previous per-file implementations.
+pub(super) fn collapse_whitespace(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_space = false;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            if !in_space {
+                out.push(' ');
+                in_space = true;
+            }
+        } else {
+            out.push(ch);
+            in_space = false;
+        }
+    }
+
+    out.trim().to_string()
+}
+
+// ─── Unified DOCX paragraph parser ──────────────────────────────────────────
+
+/// Minimum paragraph length (in bytes) for flat-paragraph consumers. Mirrors
+/// the previous per-file constant.
+pub(super) const MIN_PARAGRAPH_CHARS: usize = 10;
+
+/// Per-paragraph page-break signal produced by [`parse_docx_paragraph_events`].
+/// `Explicit` indicates a `<w:br w:type="page"/>`, `Section` a `<w:sectPr>`
+/// boundary, `Rendered` a `<w:lastRenderedPageBreak/>` hint left by Word
+/// after the last render, and `None` no in-document boundary marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PageBreakSignal {
+    Explicit,
+    Section,
+    Rendered,
+    None,
+}
+
+/// A single logical paragraph plus its trailing boundary signal. Tables are
+/// emitted as a single event with `signal == PageBreakSignal::None` (the
+/// caller treats them like any other paragraph).
+#[derive(Debug, Clone)]
+pub(super) struct ParagraphEvent {
+    pub text: String,
+    pub signal: PageBreakSignal,
+    pub is_heading: bool,
+    pub heading_level: Option<u32>,
+    pub is_list: bool,
+    pub is_table: bool,
+}
+
+/// A single logical paragraph emitted by [`parse_docx_indexed_paragraphs`].
+/// `index` reflects the position in the document's stream of accepted
+/// paragraphs (i.e. it skips paragraphs below `MIN_PARAGRAPH_CHARS`).
+#[derive(Debug, Clone)]
+pub(super) struct IndexedParagraph {
+    pub index: usize,
+    pub text: String,
+    pub is_heading: bool,
+    pub heading_level: Option<u32>,
+    pub is_list: bool,
+    pub is_table: bool,
+}
+
+/// Resolve a DOCX heading level from `<w:pStyle val="..."/>` and/or
+/// `<w:outlineLvl val="..."/>`. Returns `Some(level)` (1-based, where 1 is
+/// the highest) when either signal identifies the paragraph as a heading.
+///
+/// Style detection: case-insensitive match against names starting with
+/// `heading` (English `Heading1`..`Heading9`) plus a few common Word
+/// localisations (`title` → level 1, `Titre1` French, `Überschrift1`
+/// German). If a trailing 1-digit number is present it is used as the level,
+/// otherwise level defaults to 1.
+///
+/// Outline fallback: when no style match is found but `<w:outlineLvl>`
+/// resolved to `n`, level is `n + 1` (Word stores outline levels 0-based).
+pub(super) fn docx_heading_level(style: Option<&str>, outline: Option<u32>) -> Option<u32> {
+    if let Some(raw) = style {
+        let lower = raw.to_ascii_lowercase();
+        let prefixes: &[(&str, u32)] = &[
+            ("heading", 1),
+            ("titre", 1),
+            ("überschrift", 1),
+            ("title", 1),
+        ];
+        for (prefix, default_level) in prefixes {
+            if let Some(rest) = lower.strip_prefix(prefix) {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(n) = digits.parse::<u32>() {
+                    if n > 0 {
+                        return Some(n);
+                    }
+                }
+                return Some(*default_level);
+            }
+        }
+    }
+    outline.map(|n| n + 1)
+}
+
+/// Kind of block emitted by [`parse_docx_blocks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DocxBlockKind {
+    Paragraph,
+    Table,
+}
+
+/// A raw block emitted by the canonical DOCX walker. Every consumer-specific
+/// normalization (whitespace collapsing, length filtering, image placeholder,
+/// list-item prefixing, heading detection, …) is applied by callers on top of
+/// this stream.
+///
+/// - For `Paragraph` kind: `text` is the concatenation of run text fragments
+///   (joined with a single space by [`push_text`]), no further normalization
+///   applied.
+/// - For `Table` kind: `text` is the table rendered as a Markdown pipe table
+///   (`| a | b |` rows with a `| --- |` separator after the header row).
+///   Header rows are detected via `<w:tblHeader/>` in `<w:trPr>`; if absent,
+///   the first row of a multi-row table is treated as the header. Empty
+///   cells are preserved so columns stay aligned, rows are padded to the
+///   maximum column count, and pipe / newline characters inside cells are
+///   escaped. Nested tables are flattened inline into the parent cell
+///   (`row1cells | row1cells; row2cells | row2cells`).
+#[derive(Debug, Clone)]
+pub(super) struct DocxBlock {
+    pub kind: DocxBlockKind,
+    pub text: String,
+    pub has_drawing: bool,
+    pub is_list: bool,
+    pub heading_style: Option<String>,
+    pub outline_level: Option<u32>,
+    pub page_break: bool,
+    pub section_break: bool,
+    pub rendered_page_break: bool,
+    /// Author-provided alt text for inline images, in priority order:
+    /// `wp:docPr/@descr`, `wp:docPr/@title`, `pic:cNvPr/@descr`,
+    /// `pic:cNvPr/@name`. `None` when the paragraph contains no
+    /// `<w:drawing>` or the drawing exposes no usable description.
+    pub image_alt: Option<String>,
+    /// IDs of footnotes referenced by `<w:footnoteReference>` inside this
+    /// paragraph, in document order. Resolved against `word/footnotes.xml`
+    /// at the structural / chunking layer so anchored footnote text lands
+    /// on the same chunk as its referring paragraph instead of being
+    /// dumped at end-of-document.
+    pub footnote_refs: Vec<String>,
+    /// Same as `footnote_refs` but for `<w:endnoteReference>` →
+    /// `word/endnotes.xml`.
+    pub endnote_refs: Vec<String>,
+}
+
+/// Parse a `.docx` byte slice into a flat list of paragraphs, flattening
+/// tables to a Markdown pipe-table representation and replacing image-only
+/// paragraphs with `"[Image]"` (or `"[Image: <alt>]"` when alt text is
+/// available). Thin wrapper around
+/// [`parse_docx_paragraph_events`] that drops boundary signals and assigns
+/// sequential indices.
+pub(super) fn parse_docx_indexed_paragraphs(bytes: &[u8]) -> Result<Vec<IndexedParagraph>, String> {
+    let events = parse_docx_paragraph_events(bytes)?;
+    Ok(events
+        .into_iter()
+        .enumerate()
+        .map(|(index, ev)| IndexedParagraph {
+            index,
+            text: ev.text,
+            is_heading: ev.is_heading,
+            heading_level: ev.heading_level,
+            is_list: ev.is_list,
+            is_table: ev.is_table,
+        })
+        .collect())
+}
+
+/// Whitespace-collapsing, length-filtering flavour of the DOCX walker used by
+/// `sliding_window`, `sentence` and `page_aware`. Emits one event per
+/// accepted paragraph or table along with any `<w:br type="page">` /
+/// `<w:sectPr>` boundary signal observed inside the paragraph.
+pub(super) fn parse_docx_paragraph_events(bytes: &[u8]) -> Result<Vec<ParagraphEvent>, String> {
+    let blocks = parse_docx_blocks(bytes)?;
+    let mut events: Vec<ParagraphEvent> = Vec::with_capacity(blocks.len());
+
+    for block in blocks {
+        let heading_level = match block.kind {
+            DocxBlockKind::Paragraph => {
+                docx_heading_level(block.heading_style.as_deref(), block.outline_level)
+            }
+            DocxBlockKind::Table => None,
+        };
+        let is_heading = heading_level.is_some();
+        let is_list = matches!(block.kind, DocxBlockKind::Paragraph) && block.is_list;
+        let is_table = matches!(block.kind, DocxBlockKind::Table);
+
+        let (text, signal) = match block.kind {
+            DocxBlockKind::Paragraph => {
+                let collapsed = collapse_whitespace(&block.text);
+                let normalized = if !collapsed.is_empty() {
+                    collapsed
+                } else if block.has_drawing {
+                    image_placeholder(block.image_alt.as_deref())
+                } else {
+                    String::new()
+                };
+
+                let signal = if block.page_break {
+                    PageBreakSignal::Explicit
+                } else if block.section_break {
+                    PageBreakSignal::Section
+                } else if block.rendered_page_break {
+                    PageBreakSignal::Rendered
+                } else {
+                    PageBreakSignal::None
+                };
+                (normalized, signal)
+            }
+            DocxBlockKind::Table => {
+                let collapsed = collapse_whitespace(&block.text).trim().to_string();
+                (collapsed, PageBreakSignal::None)
+            }
+        };
+
+        if text.len() >= MIN_PARAGRAPH_CHARS {
+            events.push(ParagraphEvent {
+                text,
+                signal,
+                is_heading,
+                heading_level,
+                is_list,
+                is_table,
+            });
+        } else if !matches!(signal, PageBreakSignal::None) {
+            // Paragraph is too short to emit, but it carries a page-break
+            // signal that downstream consumers (page_aware) must not lose.
+            // Promote the signal onto the most recent emitted event so it
+            // still triggers a boundary at the right document position.
+            if let Some(last) = events.last_mut() {
+                if matches!(last.signal, PageBreakSignal::None) {
+                    last.signal = signal;
+                }
+            }
+        }
+    }
+
+    Ok(events)
+}
+
+/// Canonical walker for the body of a DOCX document. Emits one [`DocxBlock`]
+/// per `<w:p>` or `<w:tbl>` with the raw text plus every signal the
+/// consumers care about (drawings, list markers, heading style, outline
+/// level, page/section breaks). No filtering or whitespace normalisation is
+/// applied — callers decide what to do.
+pub(super) fn parse_docx_blocks(bytes: &[u8]) -> Result<Vec<DocxBlock>, String> {
+    let cursor = Cursor::new(bytes);
+    let mut archive =
+        ZipArchive::new(cursor).map_err(|e| format!("DOCX is not a valid zip archive: {e}"))?;
+
+    let mut document_xml_file = archive
+        .by_name("word/document.xml")
+        .map_err(|_| "word/document.xml not found in DOCX".to_string())?;
+
+    parse_document_xml_blocks_streaming(&mut document_xml_file)
+}
+
+/// Per-table accumulator used by [`parse_document_xml_blocks_streaming`].
+/// A stack of these supports nested tables.
+#[derive(Default)]
+struct TableState {
+    rows: Vec<Vec<String>>,
+    current_row: Vec<String>,
+    current_cell: String,
+    in_cell: bool,
+    in_tr_pr: bool,
+    in_header_row: bool,
+    /// Column span of the current cell (`<w:gridSpan w:val="N"/>`). Defaults
+    /// to 1 (no span). When > 1 the cell text is repeated into each spanned
+    /// column position so the rendered markdown stays correctly aligned and
+    /// every column retains its group-header context.
+    cell_span: usize,
+    /// One flag per completed row indicating whether `<w:tblHeader/>` was
+    /// present in its `<w:trPr>`.
+    header_row_flags: Vec<bool>,
+}
+
+fn escape_md_cell(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn render_table_markdown(state: &TableState) -> String {
+    if state.rows.is_empty() {
+        return String::new();
+    }
+    let max_cols = state.rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    if max_cols == 0 {
+        return String::new();
+    }
+
+    // Number of leading rows explicitly marked as header. Fallback: treat
+    // first row as header when the table has more than one row.
+    let mut header_count = state.header_row_flags.iter().take_while(|f| **f).count();
+    if header_count == 0 && state.rows.len() > 1 {
+        header_count = 1;
+    }
+
+    let mut out = String::new();
+    for (i, row) in state.rows.iter().enumerate() {
+        out.push('|');
+        for col in 0..max_cols {
+            let cell = row.get(col).map(String::as_str).unwrap_or("");
+            out.push(' ');
+            out.push_str(&escape_md_cell(cell));
+            out.push_str(" |");
+        }
+        out.push('\n');
+        if i + 1 == header_count && header_count < state.rows.len() {
+            out.push('|');
+            for _ in 0..max_cols {
+                out.push_str(" --- |");
+            }
+            out.push('\n');
+        }
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+fn render_table_inline(state: &TableState) -> String {
+    let mut rows: Vec<String> = Vec::with_capacity(state.rows.len());
+    for row in &state.rows {
+        let cells: Vec<String> = row.iter().map(|c| c.replace(['\n', '\r'], " ")).collect();
+        rows.push(cells.join(" | "));
+    }
+    rows.join("; ")
+}
+
+/// Pull author-provided alt text from a `<wp:docPr>` or `<pic:cNvPr>` start /
+/// empty event. Attributes are read in priority order so the most descriptive
+/// value wins: `descr` (the "Alt text — Description" field in Word) →
+/// `title` (the "Alt text — Title" field) → `name` (the auto-generated image
+/// name like `"Picture 3"`, only useful as a last-resort fallback).
+/// Returns `None` when no non-empty attribute is found.
+fn harvest_image_alt(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    let mut descr: Option<String> = None;
+    let mut title: Option<String> = None;
+    let mut name: Option<String> = None;
+    for attr in e.attributes().flatten() {
+        let value = String::from_utf8_lossy(attr.value.as_ref())
+            .trim()
+            .to_string();
+        if value.is_empty() {
+            continue;
+        }
+        if qname_eq(attr.key, b"descr") {
+            descr.get_or_insert(value);
+        } else if qname_eq(attr.key, b"title") {
+            title.get_or_insert(value);
+        } else if qname_eq(attr.key, b"name") {
+            // Skip auto-generated names like "Picture 1" / "Image 3" —
+            // they add noise without semantic value.
+            let lower = value.to_ascii_lowercase();
+            let looks_generic = lower.starts_with("picture ")
+                || lower.starts_with("image ")
+                || lower.starts_with("graphic ")
+                || lower.starts_with("chart ");
+            if !looks_generic {
+                name.get_or_insert(value);
+            }
+        }
+    }
+    descr.or(title).or(name)
+}
+
+/// Pull the `w:id` attribute from a `<w:footnoteReference>` or
+/// `<w:endnoteReference>` event. The id is the document-order link to an
+/// entry in `word/footnotes.xml` / `word/endnotes.xml`. Returns `None` when
+/// the attribute is missing or empty.
+fn harvest_note_id(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    for attr in e.attributes().flatten() {
+        if qname_eq(attr.key, b"id") {
+            let value = String::from_utf8_lossy(attr.value.as_ref())
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+/// Render the placeholder string used in place of an image-only paragraph's
+/// body. Includes the harvested alt text when available so downstream
+/// consumers (embedders, search) get a real semantic signal instead of an
+/// opaque marker.
+pub(super) fn image_placeholder(alt: Option<&str>) -> String {
+    match alt.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(a) => format!("[Image: {a}]"),
+        None => "[Image]".to_string(),
+    }
+}
+
+/// Returns true when the paragraph style name indicates a list item without
+/// requiring `<w:numPr>`. Matches Word's built-in list styles (ListNumber,
+/// ListBullet, List, and their numbered variants like ListNumber2) as well as
+/// the common single-word aliases used by older or third-party templates.
+fn is_list_style(style: &str) -> bool {
+    let lower = style.to_ascii_lowercase();
+    // Exact or prefix matches: "listbullet", "listnumber", "list", "list2"…
+    let prefixes = ["listbullet", "listnumber", "listparagraph", "list"];
+    for prefix in &prefixes {
+        if lower == *prefix || lower.starts_with(prefix) {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<DocxBlock>, String> {
+    let mut reader = Reader::from_reader(BufReader::new(reader_src));
+
+    let mut buf = Vec::new();
+    let mut blocks: Vec<DocxBlock> = Vec::new();
+
+    let mut in_text = false;
+    let mut in_paragraph = false;
+
+    let mut para_text = String::new();
+    let mut para_sub_texts: Vec<String> = Vec::new();
+    let mut para_is_list = false;
+    let mut para_has_drawing = false;
+    let mut para_has_page_break = false;
+    let mut para_has_section_break = false;
+    let mut para_has_rendered_break = false;
+    let mut para_style: Option<String> = None;
+    let mut para_outline_lvl: Option<u32> = None;
+    let mut para_image_alt: Option<String> = None;
+    let mut para_footnote_refs: Vec<String> = Vec::new();
+    let mut para_endnote_refs: Vec<String> = Vec::new();
+    // Depth counter for `<w:drawing>` so we only harvest alt attributes
+    // from `<wp:docPr>` / `<pic:cNvPr>` while we are actually inside a
+    // drawing (those local names also appear in shape XML elsewhere).
+    let mut drawing_depth: u32 = 0;
+
+    // Stack of in-progress tables. Empty when we're at top-level body
+    // content. Pushed on `<w:tbl>` Start, popped on `<w:tbl>` End. Nested
+    // tables push additional states without disturbing parent state.
+    let mut table_stack: Vec<TableState> = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                if qname_eq(name, b"tbl") {
+                    table_stack.push(TableState::default());
+                } else if qname_eq(name, b"tr") {
+                    if let Some(top) = table_stack.last_mut() {
+                        top.current_row.clear();
+                        top.in_header_row = false;
+                        top.in_tr_pr = false;
+                    }
+                } else if qname_eq(name, b"trPr") {
+                    if let Some(top) = table_stack.last_mut() {
+                        top.in_tr_pr = true;
+                    }
+                } else if qname_eq(name, b"tblHeader") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_tr_pr {
+                            top.in_header_row = true;
+                        }
+                    }
+                } else if qname_eq(name, b"tc") {
+                    if let Some(top) = table_stack.last_mut() {
+                        top.in_cell = true;
+                        top.current_cell.clear();
+                        top.cell_span = 1;
+                    }
+                } else if qname_eq(name, b"gridSpan") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            for attr in e.attributes().flatten() {
+                                if qname_eq(attr.key, b"val") {
+                                    let raw =
+                                        String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                                    if let Ok(v) = raw.trim().parse::<usize>() {
+                                        if v > 1 {
+                                            top.cell_span = v;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if qname_eq(name, b"p") {
+                    if table_stack.is_empty() {
+                        in_paragraph = true;
+                        para_text.clear();
+                        para_sub_texts.clear();
+                        para_is_list = false;
+                        para_has_drawing = false;
+                        para_has_page_break = false;
+                        para_has_section_break = false;
+                        para_has_rendered_break = false;
+                        para_style = None;
+                        para_outline_lvl = None;
+                        para_image_alt = None;
+                        para_footnote_refs.clear();
+                        para_endnote_refs.clear();
+                        drawing_depth = 0;
+                    }
+                } else if qname_eq(name, b"numPr") && in_paragraph {
+                    para_is_list = true;
+                } else if qname_eq(name, b"br") && in_paragraph {
+                    let mut is_page = false;
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"type") {
+                            let value = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_ascii_lowercase();
+                            if value == "page" {
+                                para_has_page_break = true;
+                                is_page = true;
+                            }
+                            break;
+                        }
+                    }
+                    if !is_page {
+                        // Soft line break — flush accumulated text as a sub-segment.
+                        let flushed = std::mem::take(&mut para_text).trim().to_string();
+                        if !flushed.is_empty() {
+                            para_sub_texts.push(flushed);
+                        }
+                    }
+                } else if qname_eq(name, b"sectPr") && in_paragraph {
+                    para_has_section_break = true;
+                } else if qname_eq(name, b"lastRenderedPageBreak") && in_paragraph {
+                    para_has_rendered_break = true;
+                } else if qname_eq(name, b"drawing") && in_paragraph {
+                    para_has_drawing = true;
+                    drawing_depth = drawing_depth.saturating_add(1);
+                } else if (qname_eq(name, b"docPr") || qname_eq(name, b"cNvPr"))
+                    && in_paragraph
+                    && drawing_depth > 0
+                    && para_image_alt.is_none()
+                {
+                    para_image_alt = harvest_image_alt(&e);
+                } else if qname_eq(name, b"footnoteReference") && in_paragraph {
+                    if let Some(id) = harvest_note_id(&e) {
+                        para_footnote_refs.push(id);
+                    }
+                } else if qname_eq(name, b"endnoteReference") && in_paragraph {
+                    if let Some(id) = harvest_note_id(&e) {
+                        para_endnote_refs.push(id);
+                    }
+                } else if qname_eq(name, b"pStyle") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let v = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            para_style = Some(v);
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"outlineLvl") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u32>() {
+                                para_outline_lvl = Some(v);
+                            }
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"t") {
+                    in_text = true;
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = e.name();
+                if qname_eq(name, b"numPr") && in_paragraph {
+                    para_is_list = true;
+                } else if qname_eq(name, b"tblHeader") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_tr_pr {
+                            top.in_header_row = true;
+                        }
+                    }
+                } else if qname_eq(name, b"gridSpan") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            for attr in e.attributes().flatten() {
+                                if qname_eq(attr.key, b"val") {
+                                    let raw =
+                                        String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                                    if let Ok(v) = raw.trim().parse::<usize>() {
+                                        if v > 1 {
+                                            top.cell_span = v;
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if qname_eq(name, b"br") && in_paragraph {
+                    let mut is_page = false;
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"type") {
+                            let value = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_ascii_lowercase();
+                            if value == "page" {
+                                para_has_page_break = true;
+                                is_page = true;
+                            }
+                            break;
+                        }
+                    }
+                    if !is_page {
+                        let flushed = std::mem::take(&mut para_text).trim().to_string();
+                        if !flushed.is_empty() {
+                            para_sub_texts.push(flushed);
+                        }
+                    }
+                } else if qname_eq(name, b"sectPr") && in_paragraph {
+                    para_has_section_break = true;
+                } else if qname_eq(name, b"lastRenderedPageBreak") && in_paragraph {
+                    para_has_rendered_break = true;
+                } else if qname_eq(name, b"drawing") && in_paragraph {
+                    para_has_drawing = true;
+                } else if (qname_eq(name, b"docPr") || qname_eq(name, b"cNvPr"))
+                    && in_paragraph
+                    && drawing_depth > 0
+                    && para_image_alt.is_none()
+                {
+                    para_image_alt = harvest_image_alt(&e);
+                } else if qname_eq(name, b"footnoteReference") && in_paragraph {
+                    if let Some(id) = harvest_note_id(&e) {
+                        para_footnote_refs.push(id);
+                    }
+                } else if qname_eq(name, b"endnoteReference") && in_paragraph {
+                    if let Some(id) = harvest_note_id(&e) {
+                        para_endnote_refs.push(id);
+                    }
+                } else if qname_eq(name, b"pStyle") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let v = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            para_style = Some(v);
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"outlineLvl") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u32>() {
+                                para_outline_lvl = Some(v);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                if qname_eq(name, b"t") {
+                    in_text = false;
+                } else if qname_eq(name, b"drawing") {
+                    drawing_depth = drawing_depth.saturating_sub(1);
+                } else if qname_eq(name, b"trPr") {
+                    if let Some(top) = table_stack.last_mut() {
+                        top.in_tr_pr = false;
+                    }
+                } else if qname_eq(name, b"tc") {
+                    if let Some(top) = table_stack.last_mut() {
+                        let cell = std::mem::take(&mut top.current_cell).trim().to_string();
+                        let span = top.cell_span.max(1);
+                        // Repeat the cell text into every spanned column so the
+                        // rendered markdown stays aligned and group-header context
+                        // is visible in each column position.
+                        for _ in 0..span {
+                            top.current_row.push(cell.clone());
+                        }
+                        top.in_cell = false;
+                        top.cell_span = 1;
+                    }
+                } else if qname_eq(name, b"tr") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if !top.current_row.is_empty() {
+                            let row = std::mem::take(&mut top.current_row);
+                            top.header_row_flags.push(top.in_header_row);
+                            top.rows.push(row);
+                        }
+                        top.in_header_row = false;
+                        top.in_tr_pr = false;
+                    }
+                } else if qname_eq(name, b"tbl") {
+                    if let Some(state) = table_stack.pop() {
+                        if let Some(parent) = table_stack.last_mut() {
+                            // Nested table: inline-flatten into the cell
+                            // currently being built in the parent.
+                            let inline = render_table_inline(&state);
+                            if !inline.is_empty() {
+                                if !parent.current_cell.is_empty()
+                                    && !parent.current_cell.ends_with(' ')
+                                {
+                                    parent.current_cell.push(' ');
+                                }
+                                parent.current_cell.push_str(&inline);
+                            }
+                        } else {
+                            let rendered = render_table_markdown(&state);
+                            if !rendered.is_empty() {
+                                blocks.push(DocxBlock {
+                                    kind: DocxBlockKind::Table,
+                                    text: rendered,
+                                    has_drawing: false,
+                                    is_list: false,
+                                    heading_style: None,
+                                    outline_level: None,
+                                    page_break: false,
+                                    section_break: false,
+                                    rendered_page_break: false,
+                                    image_alt: None,
+                                    footnote_refs: Vec::new(),
+                                    endnote_refs: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                } else if qname_eq(name, b"p") {
+                    if in_paragraph {
+                        // Also treat style-named list paragraphs (e.g. "ListNumber",
+                        // "ListBullet") as list items even when <w:numPr> is absent.
+                        let style_ref = para_style.as_deref().unwrap_or("");
+                        let is_list = para_is_list || is_list_style(style_ref);
+
+                        if para_sub_texts.is_empty() {
+                            // Normal case — no soft breaks, emit one block.
+                            blocks.push(DocxBlock {
+                                kind: DocxBlockKind::Paragraph,
+                                text: std::mem::take(&mut para_text),
+                                has_drawing: para_has_drawing,
+                                is_list,
+                                heading_style: para_style.take(),
+                                outline_level: para_outline_lvl.take(),
+                                page_break: para_has_page_break,
+                                section_break: para_has_section_break,
+                                rendered_page_break: para_has_rendered_break,
+                                image_alt: para_image_alt.take(),
+                                footnote_refs: std::mem::take(&mut para_footnote_refs),
+                                endnote_refs: std::mem::take(&mut para_endnote_refs),
+                            });
+                        } else {
+                            // Paragraph had soft line breaks — emit one block per segment.
+                            // Flush any trailing text after the last <w:br/>.
+                            let tail = std::mem::take(&mut para_text).trim().to_string();
+                            if !tail.is_empty() {
+                                para_sub_texts.push(tail);
+                            }
+                            for (i, sub_text) in para_sub_texts.drain(..).enumerate() {
+                                blocks.push(DocxBlock {
+                                    kind: DocxBlockKind::Paragraph,
+                                    text: sub_text,
+                                    // Drawings and break signals only belong to the first
+                                    // segment; subsequent ones are plain text continuations.
+                                    has_drawing: para_has_drawing && i == 0,
+                                    is_list,
+                                    heading_style: para_style.clone(),
+                                    outline_level: para_outline_lvl,
+                                    page_break: para_has_page_break && i == 0,
+                                    section_break: para_has_section_break && i == 0,
+                                    rendered_page_break: para_has_rendered_break && i == 0,
+                                    image_alt: if i == 0 {
+                                        para_image_alt.clone()
+                                    } else {
+                                        None
+                                    },
+                                    footnote_refs: if i == 0 {
+                                        para_footnote_refs.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                    endnote_refs: if i == 0 {
+                                        para_endnote_refs.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                });
+                            }
+                            // Clear shared fields after all sub-blocks are emitted.
+                            para_style = None;
+                            para_outline_lvl = None;
+                            para_image_alt = None;
+                            para_footnote_refs.clear();
+                            para_endnote_refs.clear();
+                        }
+
+                        in_paragraph = false;
+                        para_is_list = false;
+                        para_has_drawing = false;
+                        para_has_page_break = false;
+                        para_has_section_break = false;
+                        para_has_rendered_break = false;
+                        drawing_depth = 0;
+                    } else if let Some(top) = table_stack.last_mut() {
+                        // Separate paragraphs within a table cell with a
+                        // single space so multi-paragraph cells stay legible.
+                        if top.in_cell
+                            && !top.current_cell.is_empty()
+                            && !top.current_cell.ends_with(' ')
+                        {
+                            top.current_cell.push(' ');
+                        }
+                    }
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if in_text {
+                    let txt = match t.decode() {
+                        Ok(v) => v.into_owned(),
+                        Err(_) => String::new(),
+                    };
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            push_text(&mut top.current_cell, &txt);
+                        }
+                    } else if in_paragraph {
+                        push_text(&mut para_text, &txt);
+                    }
+                }
+            }
+            Ok(Event::CData(t)) => {
+                if in_text {
+                    let txt = String::from_utf8_lossy(t.as_ref());
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            push_text(&mut top.current_cell, &txt);
+                        }
+                    } else if in_paragraph {
+                        push_text(&mut para_text, &txt);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => return Err(format!("Failed to parse word/document.xml stream: {e}")),
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(blocks)
+}

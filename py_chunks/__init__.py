@@ -8,16 +8,23 @@ URLs.
 import os
 import tempfile
 from os import PathLike, fspath
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+# Register the package directory so the Rust layer can find a bundled
+# libpdfium binary (libpdfium.dylib / pdfium.dll / libpdfium.so) placed
+# alongside _rust.so inside this directory.  Must be set before any Rust
+# symbol that calls get_pdfium() is first invoked.
+os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(Path(__file__).parent))
+
 from .chunkers.docx import chunk_docx, stream_chunk_docx
-from .chunkers.html import chunk_html
-from .chunkers.md import chunk_md
+from .chunkers.html import chunk_html, stream_chunk_html
+from .chunkers.md import chunk_md, stream_chunk_md
 from .chunkers.pdf import chunk_pdf, stream_chunk_pdf
-from .chunkers.pptx import chunk_pptx
-from .chunkers.txt import chunk_txt
+from .chunkers.pptx import chunk_pptx, stream_chunk_pptx
+from .chunkers.txt import chunk_txt, stream_chunk_txt
 
 
 _DISPATCH = {
@@ -32,6 +39,11 @@ _DISPATCH = {
 
 _EXT_DOCX = ".docx"
 _EXT_PDF = ".pdf"
+_EXT_MD = ".md"
+_EXT_TXT = ".txt"
+_EXT_PPTX = ".pptx"
+_EXT_HTML = ".html"
+_EXT_HTM = ".htm"
 
 _SUPPORTED = ", ".join(sorted(_DISPATCH))
 
@@ -100,16 +112,14 @@ def _run_chunker(
     sentences_per_chunk: int,
     paragraphs_per_page: int,
 ):
-    if chunker in {chunk_docx, chunk_pdf}:
-        return chunker(
-            file_path,
-            mode=mode,
-            window_size=window_size,
-            overlap=overlap,
-            sentences_per_chunk=sentences_per_chunk,
-            paragraphs_per_page=paragraphs_per_page,
-        )
-    return chunker(file_path)
+    return chunker(
+        file_path,
+        mode=mode,
+        window_size=window_size,
+        overlap=overlap,
+        sentences_per_chunk=sentences_per_chunk,
+        paragraphs_per_page=paragraphs_per_page,
+    )
 
 
 def get_chunks_from_path(
@@ -336,12 +346,11 @@ def stream_chunks_from_path(
 ) -> Any:
     """Stream chunks from any supported document at a local path.
 
-    Supported extensions: .docx, .pdf
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
 
     Args:
         file_path: Path to the document file.
-        mode: Chunking mode. DOCX supports "default" and "structural"
-            (equivalent behavior); PDF supports all current PDF modes.
+        mode: Chunking mode (format-specific; see each format's chunker for details).
 
     Returns:
         Iterator that yields chunk dicts with keys: content, content_type, metadata.
@@ -356,9 +365,52 @@ def stream_chunks_from_path(
     _, ext = _resolve_chunker(file_path)
 
     if ext == _EXT_DOCX:
-        return stream_chunk_docx(file_path, mode=mode)
+        return stream_chunk_docx(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
     if ext == _EXT_PDF:
         return stream_chunk_pdf(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_MD:
+        return stream_chunk_md(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_TXT:
+        return stream_chunk_txt(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_PPTX:
+        return stream_chunk_pptx(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext in (_EXT_HTML, _EXT_HTM):
+        return stream_chunk_html(
             file_path,
             mode=mode,
             window_size=window_size,
@@ -386,14 +438,13 @@ def stream_chunks_from_bytes(
     then deletes the temp file. The original filename is only used for
     extension detection — it is never written to disk under that name.
 
-    Supported extensions: .docx, .pdf
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
 
     Args:
         data:     Raw bytes of the document.
-        filename: Original filename (e.g. ``"report.docx"``). Used to
+        filename: Original filename (e.g. ``"report.pdf"``). Used to
                   determine the file type.
-        mode: Chunking mode. DOCX supports "default" and "structural"
-            (equivalent behavior); PDF supports all current PDF modes.
+        mode: Chunking mode (format-specific; see each format's chunker for details).
 
     Returns:
         Iterator that yields chunk dicts with keys: content, content_type, metadata.
@@ -411,10 +462,57 @@ def stream_chunks_from_bytes(
         tmp_path = tmp.name
 
     if ext == _EXT_DOCX:
-        iterator = stream_chunk_docx(tmp_path, mode=mode)
+        iterator = stream_chunk_docx(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
         return _StreamingFileCleanup(iterator, tmp_path)
     if ext == _EXT_PDF:
         iterator = stream_chunk_pdf(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_MD:
+        iterator = stream_chunk_md(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_TXT:
+        iterator = stream_chunk_txt(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_PPTX:
+        iterator = stream_chunk_pptx(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext in (_EXT_HTML, _EXT_HTM):
+        iterator = stream_chunk_html(
             tmp_path,
             mode=mode,
             window_size=window_size,
@@ -561,7 +659,7 @@ def stream_chunks(
     Returns an iterator that yields chunks one at a time without buffering
     the entire result list in memory. Useful for large documents.
 
-    Currently supports streaming for DOCX and PDF files.
+    Supports streaming for all formats: .docx, .htm, .html, .md, .pdf, .pptx, .txt
 
     Args:
         source: File path, URL, bytes, file-like object, or upload object.
@@ -738,9 +836,13 @@ __all__ = [
     "chunk_docx",
     "stream_chunk_docx",
     "chunk_html",
+    "stream_chunk_html",
     "chunk_md",
+    "stream_chunk_md",
     "chunk_pdf",
     "stream_chunk_pdf",
     "chunk_pptx",
+    "stream_chunk_pptx",
     "chunk_txt",
+    "stream_chunk_txt",
 ]

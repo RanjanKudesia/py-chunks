@@ -3,14 +3,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
-use quick_xml::events::Event;
-use quick_xml::name::QName;
-use quick_xml::Reader;
 use serde_json::{json, Value};
+
+use super::common::{image_placeholder, parse_docx_blocks, DocxBlock, DocxBlockKind};
 use std::fs;
-use std::io::{BufReader, Cursor, Read};
 use std::time::Instant;
-use zip::ZipArchive;
 
 const MAX_SECTION_CHARS: usize = 2000;
 
@@ -55,8 +52,9 @@ fn chunk_docx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
         .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
 
     let rust_start = Instant::now();
-    let blocks = parse_docx_blocks(&bytes)
+    let raw_blocks = parse_docx_blocks(&bytes)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let blocks = lower_blocks(raw_blocks);
     let chunks_raw = build_section_chunks(blocks);
     let rust_ms = rust_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -77,32 +75,58 @@ fn chunk_docx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     Ok(result.into_any().unbind())
 }
 
-fn parse_docx_blocks(bytes: &[u8]) -> Result<Vec<DocumentBlock>, String> {
-    let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("DOCX is not a valid zip archive: {e}"))?;
+fn lower_blocks(raw: Vec<DocxBlock>) -> Vec<DocumentBlock> {
+    let mut out: Vec<DocumentBlock> = Vec::with_capacity(raw.len());
 
-    let mut document_xml_file = archive
-        .by_name("word/document.xml")
-        .map_err(|_| "word/document.xml not found in DOCX".to_string())?;
+    for block in raw {
+        match block.kind {
+            DocxBlockKind::Table => {
+                let table_text = block.text.trim().to_string();
+                if !table_text.is_empty() {
+                    out.push(DocumentBlock {
+                        block_type: BlockType::Table,
+                        text: table_text,
+                        heading_level: None,
+                    });
+                }
+            }
+            DocxBlockKind::Paragraph => {
+                let text = block.text.trim().to_string();
+                let has_text = !text.is_empty();
 
-    parse_document_xml_blocks_streaming(&mut document_xml_file)
-}
+                if !has_text && !block.has_drawing {
+                    continue;
+                }
 
-fn qname_eq(name: QName<'_>, expected: &[u8]) -> bool {
-    let n = name.as_ref();
-    n == expected || n.rsplit(|b| *b == b':').next() == Some(expected)
-}
+                let heading_level =
+                    parse_heading_level(block.heading_style.as_deref(), block.outline_level);
 
-fn push_text(target: &mut String, piece: &str) {
-    let trimmed = piece.trim();
-    if trimmed.is_empty() {
-        return;
+                let normalized = if has_text {
+                    text
+                } else {
+                    image_placeholder(block.image_alt.as_deref())
+                };
+
+                let block_type = if heading_level.is_some() {
+                    BlockType::Paragraph
+                } else if block.is_list {
+                    BlockType::BulletList
+                } else if block.has_drawing {
+                    BlockType::Image
+                } else {
+                    BlockType::Paragraph
+                };
+
+                out.push(DocumentBlock {
+                    block_type,
+                    text: normalized,
+                    heading_level,
+                });
+            }
+        }
     }
-    if !target.is_empty() {
-        target.push(' ');
-    }
-    target.push_str(trimmed);
+
+    out
 }
 
 fn parse_heading_level(style_val: Option<&str>, outline_level: Option<u32>) -> Option<u32> {
@@ -140,206 +164,6 @@ fn parse_heading_level(style_val: Option<&str>, outline_level: Option<u32>) -> O
 
     outline_level.map(|v| v.saturating_add(1))
 }
-
-fn parse_document_xml_blocks_streaming<R: Read>(
-    reader_src: R,
-) -> Result<Vec<DocumentBlock>, String> {
-    let mut reader = Reader::from_reader(BufReader::new(reader_src));
-
-    let mut buf = Vec::new();
-    let mut blocks = Vec::new();
-
-    let mut in_table = false;
-    let mut in_cell = false;
-    let mut in_text = false;
-    let mut in_paragraph = false;
-
-    let mut para_text = String::new();
-    let mut para_style: Option<String> = None;
-    let mut para_outline_lvl: Option<u32> = None;
-    let mut para_is_list = false;
-    let mut para_has_drawing = false;
-
-    let mut table_rows: Vec<String> = Vec::new();
-    let mut row_cells: Vec<String> = Vec::new();
-    let mut cell_text = String::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"tbl") {
-                    in_table = true;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"tr") && in_table {
-                    row_cells.clear();
-                } else if qname_eq(name, b"tc") && in_table {
-                    in_cell = true;
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") {
-                    if !in_table {
-                        in_paragraph = true;
-                        para_text.clear();
-                        para_style = None;
-                        para_outline_lvl = None;
-                        para_is_list = false;
-                        para_has_drawing = false;
-                    }
-                } else if qname_eq(name, b"numPr") && in_paragraph {
-                    para_is_list = true;
-                } else if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                } else if qname_eq(name, b"pStyle") && in_paragraph {
-                    for attr in e.attributes().flatten() {
-                        if qname_eq(attr.key, b"val") {
-                            let v = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            para_style = Some(v);
-                            break;
-                        }
-                    }
-                } else if qname_eq(name, b"outlineLvl") && in_paragraph {
-                    for attr in e.attributes().flatten() {
-                        if qname_eq(attr.key, b"val") {
-                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            if let Ok(v) = raw.trim().parse::<u32>() {
-                                para_outline_lvl = Some(v);
-                            }
-                            break;
-                        }
-                    }
-                } else if qname_eq(name, b"t") {
-                    in_text = true;
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"numPr") && in_paragraph {
-                    para_is_list = true;
-                } else if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                } else if qname_eq(name, b"pStyle") && in_paragraph {
-                    for attr in e.attributes().flatten() {
-                        if qname_eq(attr.key, b"val") {
-                            let v = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            para_style = Some(v);
-                            break;
-                        }
-                    }
-                } else if qname_eq(name, b"outlineLvl") && in_paragraph {
-                    for attr in e.attributes().flatten() {
-                        if qname_eq(attr.key, b"val") {
-                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                            if let Ok(v) = raw.trim().parse::<u32>() {
-                                para_outline_lvl = Some(v);
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"t") {
-                    in_text = false;
-                } else if qname_eq(name, b"tc") && in_table {
-                    let cell = cell_text.trim().to_string();
-                    if !cell.is_empty() {
-                        row_cells.push(cell);
-                    }
-                    cell_text.clear();
-                    in_cell = false;
-                } else if qname_eq(name, b"tr") && in_table {
-                    if !row_cells.is_empty() {
-                        table_rows.push(row_cells.join(" | "));
-                    }
-                    row_cells.clear();
-                } else if qname_eq(name, b"tbl") && in_table {
-                    let table_text = table_rows.join("\n").trim().to_string();
-                    if !table_text.is_empty() {
-                        blocks.push(DocumentBlock {
-                            block_type: BlockType::Table,
-                            text: table_text,
-                            heading_level: None,
-                        });
-                    }
-                    in_table = false;
-                    in_cell = false;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") && in_paragraph {
-                    let text = para_text.trim().to_string();
-                    let has_text = !text.is_empty();
-                    let heading_level =
-                        parse_heading_level(para_style.as_deref(), para_outline_lvl);
-
-                    if has_text || para_has_drawing {
-                        let normalized = if has_text {
-                            text
-                        } else {
-                            "[Image]".to_string()
-                        };
-
-                        let block_type = if heading_level.is_some() {
-                            BlockType::Paragraph
-                        } else if para_is_list {
-                            BlockType::BulletList
-                        } else if para_has_drawing {
-                            BlockType::Image
-                        } else {
-                            BlockType::Paragraph
-                        };
-
-                        blocks.push(DocumentBlock {
-                            block_type,
-                            text: normalized,
-                            heading_level,
-                        });
-                    }
-
-                    in_paragraph = false;
-                    para_text.clear();
-                    para_style = None;
-                    para_outline_lvl = None;
-                    para_is_list = false;
-                    para_has_drawing = false;
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_text {
-                    let txt = match t.decode() {
-                        Ok(v) => v.into_owned(),
-                        Err(_) => String::new(),
-                    };
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
-                }
-            }
-            Ok(Event::CData(t)) => {
-                if in_text {
-                    let txt = String::from_utf8_lossy(t.as_ref());
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Failed to parse word/document.xml stream: {e}")),
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    Ok(blocks)
-}
-
 fn build_section_chunks(blocks: Vec<DocumentBlock>) -> Vec<ChunkRecordInput> {
     let mut chunks = Vec::new();
     let mut preamble_lines: Vec<String> = Vec::new();
@@ -438,6 +262,7 @@ fn emit_section_chunks(
         let mut metadata = json!({
             "section_heading": heading,
             "section_level": level,
+            "section_heading_level": level,
             "heading_path": path.join(" > "),
             "document_metadata": {
                 "source_type": "docx"
@@ -511,7 +336,54 @@ fn split_text_by_max_chars(text: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
+#[pyclass]
+pub struct DocxSectionIterator {
+    chunks: Vec<ChunkRecordInput>,
+    index: usize,
+}
+
+#[pymethods]
+impl DocxSectionIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if self.index >= self.chunks.len() {
+            return Ok(None);
+        }
+        let chunk = &self.chunks[self.index];
+        self.index += 1;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("content", &chunk.content)?;
+        dict.set_item("content_type", "section")?;
+        dict.set_item("metadata", pythonize(py, &chunk.metadata)?)?;
+        Ok(Some(dict.into_any().unbind()))
+    }
+}
+
+#[pyfunction]
+fn chunk_docx_section_stream(file_path: &str) -> PyResult<DocxSectionIterator> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let raw_blocks = parse_docx_blocks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let blocks = lower_blocks(raw_blocks);
+    let chunks = build_section_chunks(blocks);
+
+    Ok(DocxSectionIterator { chunks, index: 0 })
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx_section, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_section_stream, m)?)?;
+    m.add_class::<DocxSectionIterator>()?;
     Ok(())
 }

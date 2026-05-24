@@ -77,6 +77,21 @@ def chunk_pdf(
 ) -> tuple[list[dict], dict]:
     """Chunk a PDF file using the Rust extension module.
 
+    Args:
+        file_path: Path to the .pdf file.
+        mode: Chunking mode. One of:
+              ``"default"``     — fast lightweight extraction via
+              ``chunk_pdf_fast`` (minimal font analysis).
+              ``"structural"``  — full font-size-weighted span pipeline via
+              ``chunk_pdf``.
+              ``"section"``     — heading-scoped grouping.
+              ``"semantic"``    — heuristic topic-continuity grouping.
+              ``"sliding_window"`` — overlapping paragraph windows.
+              ``"sentence"``    — N sentences per chunk.
+              ``"page_aware"``  — page-boundary grouping.
+              ``"default"`` and ``"structural"`` are not equivalent for
+              PDF and may produce different output on the same file.
+
     Returns:
         (chunks, timing) where:
           - chunks: list of dicts with keys content, content_type, metadata

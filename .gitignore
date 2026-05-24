@@ -1,3 +1,8 @@
+# Bundled PDFium binaries — downloaded by CI, never committed
+py_chunks/libpdfium.dylib
+py_chunks/libpdfium.so
+py_chunks/pdfium.dll
+
 # Python artifacts
 __pycache__/
 *.py[cod]

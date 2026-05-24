@@ -8,9 +8,9 @@ use std::time::Instant;
 
 use super::common::{
     absorb_heading_only_units, build_paragraph, build_units, classify_chunk, is_noise_line,
-    is_standalone_number, is_toc_heading, looks_like_toc_entry, normalize_line, split_large_text,
-    split_raw_blocks, split_unit, ChunkUnit, ContentType, Paragraph, MAX_CHUNK_CHARS,
-    MIN_CHUNK_CHARS,
+    is_standalone_number, is_table_text, is_toc_heading, looks_like_toc_entry, normalize_line,
+    split_large_text, split_raw_blocks, split_unit, ChunkUnit, ContentType, Paragraph,
+    ParagraphKind, MAX_CHUNK_CHARS, MIN_CHUNK_CHARS,
 };
 
 const MAX_SECTION_CHARS: usize = 2000;
@@ -36,11 +36,7 @@ const TRANSITION_STARTS: [&str; 12] = [
     "hence",
 ];
 
-const STOPWORDS: [&str; 24] = [
-    "the", "and", "for", "are", "was", "were", "this", "that", "with", "from", "have", "been",
-    "will", "they", "their", "which", "about", "into", "more", "also", "when", "than", "those",
-    "these",
-];
+use super::super::shared::STOPWORDS;
 
 #[derive(Debug, Clone)]
 struct PdfSpan {
@@ -87,6 +83,7 @@ struct SemanticChunk {
 struct SlidingWindowChunk {
     content: String,
     page_number: usize,
+    end_page_number: usize,
     window_index: usize,
     start_paragraph_index: usize,
     end_paragraph_index: usize,
@@ -110,6 +107,8 @@ struct ChunkRecordInput {
 #[derive(Debug, Clone)]
 struct IndexedSentence {
     paragraph_index: usize,
+    page_number: usize,
+    is_table: bool,
     text: String,
 }
 
@@ -131,8 +130,14 @@ pub(super) fn classify_chunk_structural(
     avg_font_size: f32,
     doc_avg_size: f32,
 ) -> ContentType {
-    if avg_font_size >= doc_avg_size * 1.4 {
-        return ContentType::HeadingSection;
+    // Font-size alone can fire in PDFs that use a uniformly large font for all
+    // body text.  Require both a large avg font AND a short word-count so that
+    // multi-sentence paragraphs are never incorrectly labelled as headings.
+    if avg_font_size >= doc_avg_size * 1.25 {
+        let word_count = text.split_whitespace().count();
+        if word_count <= 15 {
+            return ContentType::HeadingSection;
+        }
     }
 
     classify_chunk(text)
@@ -222,8 +227,13 @@ fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize,
     let avg_doc_size = sizes.iter().sum::<f32>() / sizes.len() as f32;
     let mut sorted_sizes = sizes.clone();
     sorted_sizes.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let p90_idx = (((sorted_sizes.len() as f32) * 0.90) as usize).min(sorted_sizes.len() - 1);
-    let p90_size = sorted_sizes[p90_idx];
+
+    // Use median font size as the baseline body-text reference.  Median is more
+    // robust than p90 because it is not influenced by the proportion of heading
+    // spans (headings can be ≤ 50 % of spans in heading-heavy PDFs, but the
+    // median still lands on body text).
+    let median_idx = sorted_sizes.len() / 2;
+    let median_size = sorted_sizes[median_idx];
 
     let mut paragraphs: Vec<(String, bool, usize, f32)> = Vec::new();
     let mut current_lines: Vec<String> = Vec::new();
@@ -233,22 +243,34 @@ fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize,
     let mut current_is_heading = false;
 
     for span in &spans {
-        let is_heading = span.font_size >= p90_size || span.font_size >= avg_doc_size * 1.5;
+        // A span is a heading if its font is at least 20 % above the median body
+        // size, OR at least 50 % above the document average (very large display).
+        // Median (not p90) handles PDFs where headings are 30–40 % of spans:
+        // the median still lands on body text, not on the heading font.
+        let is_heading = span.font_size > median_size * 1.2 || span.font_size >= avg_doc_size * 1.5;
 
         let y_gap = (prev_y - span.line_y).abs();
         let is_new_para = span.page_number != current_page
             || y_gap > span.font_size * 1.5
             || is_heading != current_is_heading;
+        let is_new_line = !is_new_para && y_gap > span.font_size * 0.35;
 
         if is_new_para && !current_lines.is_empty() {
-            let text = current_lines.join(" ").trim().to_string();
+            let text = current_lines.join("\n").trim().to_string();
             if !text.is_empty() && text.len() >= 10 {
                 paragraphs.push((text, current_is_heading, current_page, current_size));
             }
             current_lines.clear();
         }
 
-        current_lines.push(span.text.clone());
+        if current_lines.is_empty() || is_new_line {
+            current_lines.push(span.text.clone());
+        } else if let Some(last_line) = current_lines.last_mut() {
+            if !last_line.is_empty() {
+                last_line.push(' ');
+            }
+            last_line.push_str(&span.text);
+        }
         current_page = span.page_number;
         current_size = span.font_size;
         current_is_heading = is_heading;
@@ -256,7 +278,7 @@ fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize,
     }
 
     if !current_lines.is_empty() {
-        let text = current_lines.join(" ").trim().to_string();
+        let text = current_lines.join("\n").trim().to_string();
         if !text.is_empty() && text.len() >= 10 {
             paragraphs.push((text, current_is_heading, current_page, current_size));
         }
@@ -339,10 +361,17 @@ fn resolve_pdfium_library_path() -> Option<String> {
         .get_or_init(|| {
             let mut candidates = Vec::new();
 
+            // Highest priority: explicit env var pointing straight at the library file.
             if let Ok(explicit) = std::env::var("PDFIUM_LIBRARY_PATH") {
                 if !explicit.trim().is_empty() && std::path::Path::new(&explicit).exists() {
                     candidates.push(explicit);
                 }
+            }
+
+            // Second priority: bundled binary shipped alongside _rust.so inside
+            // the py_chunks package directory (set by __init__.py at import time).
+            if let Ok(pkg_dir) = std::env::var("PY_CHUNKS_PACKAGE_DIR") {
+                add_candidate_file(&mut candidates, std::path::PathBuf::from(pkg_dir));
             }
 
             for prefix_var in ["VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME"] {
@@ -458,6 +487,7 @@ fn collect_paragraph_records(
                     Paragraph {
                         text: real_lines.join("\n"),
                         is_heading: true,
+                        kind: ParagraphKind::Heading,
                     }
                 } else {
                     match build_paragraph(real_lines) {
@@ -480,6 +510,7 @@ fn collect_paragraph_records(
                 Paragraph {
                     text: clean.join("\n"),
                     is_heading: true,
+                    kind: ParagraphKind::Heading,
                 }
             } else {
                 match build_paragraph(clean) {
@@ -534,6 +565,77 @@ fn split_section_with_heading(heading: &str, body: &str, max_chars: usize) -> Ve
         .collect()
 }
 
+fn split_section_with_heading_lines(
+    heading: &str,
+    body_lines: &[String],
+    max_chars: usize,
+) -> Vec<String> {
+    let heading = heading.trim();
+    let body = body_lines.join("\n").trim().to_string();
+
+    if heading.is_empty() && body.is_empty() {
+        return Vec::new();
+    }
+
+    if body.is_empty() {
+        return vec![heading.to_string()];
+    }
+
+    let heading_prefix_len = heading.len().saturating_add(1);
+    let max_body_chars = max_chars.saturating_sub(heading_prefix_len).max(200);
+    let mut body_parts: Vec<String> = Vec::new();
+    let mut current_parts: Vec<String> = Vec::new();
+    let mut current_len = 0usize;
+
+    for line in body_lines {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        for part in split_large_text(line, max_body_chars) {
+            let part_is_table = is_table_text(&part);
+            let sep = if current_parts.is_empty() { 0 } else { 1 };
+            let candidate = current_len + sep + part.len();
+
+            if part_is_table && !current_parts.is_empty() {
+                body_parts.push(current_parts.join("\n").trim().to_string());
+                current_parts.clear();
+                current_len = 0;
+            }
+
+            if !current_parts.is_empty() && candidate > max_body_chars {
+                body_parts.push(current_parts.join("\n").trim().to_string());
+                current_parts.clear();
+                current_len = 0;
+            }
+
+            current_len += if current_parts.is_empty() {
+                part.len()
+            } else {
+                part.len() + 1
+            };
+            current_parts.push(part);
+
+            if part_is_table {
+                body_parts.push(current_parts.join("\n").trim().to_string());
+                current_parts.clear();
+                current_len = 0;
+            }
+        }
+    }
+
+    if !current_parts.is_empty() {
+        body_parts.push(current_parts.join("\n").trim().to_string());
+    }
+
+    body_parts
+        .into_iter()
+        .map(|part| format!("{}\n{}", heading, part.trim()).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn flush_section(
     output: &mut Vec<SectionChunkRecord>,
     heading: &str,
@@ -543,7 +645,11 @@ fn flush_section(
     doc_avg_font_size: f32,
 ) {
     let body = body_lines.join("\n").trim().to_string();
-    let chunks = split_section_with_heading(heading, &body, MAX_SECTION_CHARS);
+    // Skip heading-only micro-chunks with no body content.
+    if body.is_empty() {
+        return;
+    }
+    let chunks = split_section_with_heading_lines(heading, body_lines, MAX_SECTION_CHARS);
     let section_level = infer_section_level(heading_font_size, doc_avg_font_size);
     let paragraph_count = body_lines.len();
 
@@ -561,6 +667,14 @@ fn flush_section(
 
 fn collapse_whitespace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn render_chunk_paragraph(paragraph: &Paragraph) -> String {
+    if paragraph.kind == ParagraphKind::Table {
+        paragraph.text.clone()
+    } else {
+        collapse_whitespace(&paragraph.text)
+    }
 }
 
 fn starts_with_reference_pronoun(paragraph: &str) -> bool {
@@ -597,10 +711,16 @@ fn has_keyword_overlap(a: &HashSet<String>, b: &HashSet<String>) -> bool {
 }
 
 fn build_pdf_semantic_chunks(paragraph_records: Vec<ParagraphRecord>) -> Vec<SemanticChunk> {
-    let records: Vec<(String, usize)> = paragraph_records
+    let records: Vec<(String, usize, bool)> = paragraph_records
         .into_iter()
-        .map(|r| (collapse_whitespace(&r.paragraph.text), r.page_number))
-        .filter(|(p, _)| !p.is_empty())
+        .map(|r| {
+            (
+                render_chunk_paragraph(&r.paragraph),
+                r.page_number,
+                r.paragraph.kind == ParagraphKind::Table,
+            )
+        })
+        .filter(|(p, _, _)| !p.is_empty())
         .collect();
 
     if records.is_empty() {
@@ -608,18 +728,39 @@ fn build_pdf_semantic_chunks(paragraph_records: Vec<ParagraphRecord>) -> Vec<Sem
     }
 
     let mut chunks: Vec<SemanticChunk> = Vec::new();
-    let (first_text, first_page) = &records[0];
+    let (first_text, first_page, first_is_table) = &records[0];
     let mut current = SemanticChunk {
         paragraphs: vec![first_text.clone()],
         page_number: *first_page,
-        merge_reason: "keyword_overlap",
+        merge_reason: if *first_is_table {
+            "table_boundary"
+        } else {
+            "keyword_overlap"
+        },
     };
     let mut current_keywords = tokenize_keywords(first_text);
+    let mut current_is_table = *first_is_table;
 
-    for (para, page_number) in records.iter().skip(1) {
+    for (para, page_number, is_table) in records.iter().skip(1) {
         let para_keywords = tokenize_keywords(para);
         let mut should_merge = false;
         let mut reason = current.merge_reason;
+
+        if current_is_table || *is_table {
+            chunks.push(current);
+            current = SemanticChunk {
+                paragraphs: vec![para.clone()],
+                page_number: *page_number,
+                merge_reason: if *is_table {
+                    "table_boundary"
+                } else {
+                    "keyword_overlap"
+                },
+            };
+            current_keywords = para_keywords;
+            current_is_table = *is_table;
+            continue;
+        }
 
         if *page_number == current.page_number {
             if starts_with_transition(para) {
@@ -655,6 +796,7 @@ fn build_pdf_semantic_chunks(paragraph_records: Vec<ParagraphRecord>) -> Vec<Sem
                 },
             };
             current_keywords = para_keywords;
+            current_is_table = *is_table;
         }
     }
 
@@ -662,6 +804,22 @@ fn build_pdf_semantic_chunks(paragraph_records: Vec<ParagraphRecord>) -> Vec<Sem
     chunks
 }
 fn split_paragraph_sentences(paragraph: &ParagraphRecord) -> Vec<IndexedSentence> {
+    if paragraph.paragraph.kind == ParagraphKind::Table {
+        return paragraph
+            .paragraph
+            .text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(|line| IndexedSentence {
+                paragraph_index: paragraph.paragraph_index,
+                page_number: paragraph.page_number,
+                is_table: true,
+                text: line.to_string(),
+            })
+            .collect();
+    }
+
     let chars: Vec<char> = paragraph.paragraph.text.chars().collect();
     if chars.is_empty() {
         return Vec::new();
@@ -680,6 +838,8 @@ fn split_paragraph_sentences(paragraph: &ParagraphRecord) -> Vec<IndexedSentence
             if !sentence.is_empty() {
                 out.push(IndexedSentence {
                     paragraph_index: paragraph.paragraph_index,
+                    page_number: paragraph.page_number,
+                    is_table: false,
                     text: sentence,
                 });
             }
@@ -701,6 +861,8 @@ fn split_paragraph_sentences(paragraph: &ParagraphRecord) -> Vec<IndexedSentence
         if !tail.is_empty() {
             out.push(IndexedSentence {
                 paragraph_index: paragraph.paragraph_index,
+                page_number: paragraph.page_number,
+                is_table: false,
                 text: tail,
             });
         }
@@ -774,6 +936,7 @@ fn ends_with_initials_abbreviation(prefix: &str) -> bool {
 fn build_pdf_sentence_chunks(
     paragraph_records: Vec<ParagraphRecord>,
     sentences_per_chunk: usize,
+    total_pages: u16,
 ) -> Vec<ChunkRecordInput> {
     let sentences: Vec<IndexedSentence> = paragraph_records
         .iter()
@@ -789,13 +952,20 @@ fn build_pdf_sentence_chunks(
     let mut chunk_index = 0usize;
 
     while start < sentences.len() {
-        let end = (start + sentences_per_chunk).min(sentences.len());
+        let first_is_table = sentences[start].is_table;
+        let mut end = start;
+        while end < sentences.len()
+            && sentences[end].is_table == first_is_table
+            && end - start < sentences_per_chunk
+        {
+            end += 1;
+        }
         let window = &sentences[start..end];
         let content = window
             .iter()
             .map(|sentence| sentence.text.clone())
             .collect::<Vec<_>>()
-            .join(" ");
+            .join(if first_is_table { "\n" } else { " " });
 
         chunks.push(ChunkRecordInput {
             content,
@@ -804,8 +974,11 @@ fn build_pdf_sentence_chunks(
                 "actual_sentence_count": window.len(),
                 "chunk_index": chunk_index,
                 "source_paragraph_index": window[0].paragraph_index,
+                "page_number": window[0].page_number,
+                "contains_table": first_is_table,
                 "document_metadata": {
-                    "source_type": "pdf"
+                    "source_type": "pdf",
+                    "total_pages": total_pages
                 }
             }),
         });
@@ -823,7 +996,7 @@ fn build_pdf_sliding_window_chunks(
 ) -> Vec<SlidingWindowChunk> {
     let records: Vec<(String, usize)> = paragraph_records
         .into_iter()
-        .map(|r| (collapse_whitespace(&r.paragraph.text), r.page_number))
+        .map(|r| (render_chunk_paragraph(&r.paragraph), r.page_number))
         .filter(|(p, _)| !p.is_empty())
         .collect();
 
@@ -849,6 +1022,7 @@ fn build_pdf_sliding_window_chunks(
             chunks.push(SlidingWindowChunk {
                 content,
                 page_number: window[0].1,
+                end_page_number: window.last().map(|(_, p)| *p).unwrap_or(window[0].1),
                 window_index,
                 start_paragraph_index: start,
                 end_paragraph_index: end.saturating_sub(1),
@@ -894,7 +1068,7 @@ fn build_pdf_page_aware_chunks(
             current_page = record.page_number;
         }
 
-        current_paragraphs.push(collapse_whitespace(&record.paragraph.text));
+        current_paragraphs.push(render_chunk_paragraph(&record.paragraph));
         count_on_current_chunk += 1;
 
         // Fallback split for very dense pages.
@@ -936,6 +1110,7 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let mut raw_chunk_records: Vec<(String, usize)> = Vec::new();
 
@@ -946,8 +1121,8 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
             Err(_) => continue,
         };
 
-        let raw = normalize_line(&page_text.all());
-        if raw.is_empty() {
+        let raw = page_text.all();
+        if raw.trim().is_empty() {
             continue;
         }
 
@@ -955,7 +1130,7 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
         for block_lines in split_raw_blocks(&raw) {
             let clean: Vec<String> = block_lines
                 .iter()
-                .map(|l| normalize_line(l))
+                .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
                 .collect();
 
@@ -968,6 +1143,7 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
             let para = build_paragraph(clean.clone()).unwrap_or(Paragraph {
                 text: clean.join(" "),
                 is_heading: false,
+                kind: ParagraphKind::Plain,
             });
 
             let text = para.text.trim().to_string();
@@ -987,13 +1163,13 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
         }
 
         if !page_had_blocks {
-            raw_chunk_records.push((raw, page_number));
+            raw_chunk_records.push((normalize_line(&raw), page_number));
         }
     }
 
     if raw_chunk_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1024,6 +1200,10 @@ pub fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
             let content_type = classify_chunk(text);
             let metadata_dict = PyDict::new_bound(py);
             metadata_dict.set_item("page_number", page_number)?;
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", text)?;
@@ -1054,6 +1234,7 @@ pub fn chunk_pdf(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let prepared = prepare_structural_chunks(&doc).map_err(|e| PyRuntimeError::new_err(e))?;
     let units = prepared.units;
@@ -1109,7 +1290,7 @@ pub fn chunk_pdf(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
             let avg_font_size = record.avg_font_size;
             let is_heading_chunk = record.heading_hint;
 
-            let content_type = if is_heading_chunk {
+            let content_type = if is_heading_chunk && avg_font_size >= global_avg_font_size * 1.15 {
                 ContentType::HeadingSection
             } else {
                 classify_chunk_structural(&record.text, avg_font_size, global_avg_font_size)
@@ -1119,6 +1300,10 @@ pub fn chunk_pdf(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
             metadata_dict.set_item("page_number", page_number)?;
             metadata_dict.set_item("is_heading", is_heading_chunk)?;
             metadata_dict.set_item("avg_font_size", format!("{:.2}", avg_font_size))?;
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &record.text)?;
@@ -1187,7 +1372,7 @@ pub(super) fn prepare_paragraph_records(
 ) -> Result<ParagraphsPrepared, String> {
     let spans = extract_spans_from_doc(doc);
     if spans.is_empty() {
-        return Err("PDF appears to contain no extractable text".to_string());
+        return Err("PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.".to_string());
     }
 
     let global_avg_font_size = spans.iter().map(|s| s.font_size).sum::<f32>() / spans.len() as f32;
@@ -1195,7 +1380,7 @@ pub(super) fn prepare_paragraph_records(
     let paragraph_records = collect_paragraph_records(grouped_paragraphs);
 
     if paragraph_records.is_empty() {
-        return Err("PDF appears to contain no extractable text".to_string());
+        return Err("PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.".to_string());
     }
 
     Ok(ParagraphsPrepared {
@@ -1218,11 +1403,12 @@ pub fn chunk_pdf_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> 
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let spans = extract_spans_from_doc(&doc);
     if spans.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1232,7 +1418,7 @@ pub fn chunk_pdf_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> 
 
     if paragraph_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1325,6 +1511,10 @@ pub fn chunk_pdf_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> 
                 "heading_font_size",
                 format!("{:.2}", record.heading_font_size),
             )?;
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &record.text)?;
@@ -1354,11 +1544,12 @@ pub fn chunk_pdf_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject>
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let spans = extract_spans_from_doc(&doc);
     if spans.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1367,7 +1558,7 @@ pub fn chunk_pdf_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject>
 
     if paragraph_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1388,6 +1579,10 @@ pub fn chunk_pdf_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject>
             metadata_dict.set_item("page_number", chunk.page_number)?;
             metadata_dict.set_item("paragraph_count", chunk.paragraphs.len())?;
             metadata_dict.set_item("merge_reason", chunk.merge_reason)?;
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &text)?;
@@ -1426,11 +1621,12 @@ pub fn chunk_pdf_sentence(
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let spans = extract_spans_from_doc(&doc);
     if spans.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1439,11 +1635,12 @@ pub fn chunk_pdf_sentence(
 
     if paragraph_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
-    let sentence_chunks = build_pdf_sentence_chunks(paragraph_records, sentences_per_chunk);
+    let sentence_chunks =
+        build_pdf_sentence_chunks(paragraph_records, sentences_per_chunk, total_pages);
     if sentence_chunks.is_empty() {
         return Err(PyRuntimeError::new_err(
             "No sentence chunks generated from PDF",
@@ -1466,6 +1663,16 @@ pub fn chunk_pdf_sentence(
             if let Some(para_idx) = chunk.metadata.get("source_paragraph_index") {
                 metadata_dict.set_item("source_paragraph_index", para_idx.as_u64())?;
             }
+            if let Some(page_number) = chunk.metadata.get("page_number") {
+                metadata_dict.set_item("page_number", page_number.as_u64())?;
+            }
+            if let Some(contains_table) = chunk.metadata.get("contains_table") {
+                metadata_dict.set_item("contains_table", contains_table.as_bool())?;
+            }
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &chunk.content)?;
@@ -1508,11 +1715,12 @@ pub fn chunk_pdf_sliding_window(
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let spans = extract_spans_from_doc(&doc);
     if spans.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1521,7 +1729,7 @@ pub fn chunk_pdf_sliding_window(
 
     if paragraph_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1551,6 +1759,15 @@ pub fn chunk_pdf_sliding_window(
             metadata_dict.set_item("window_index", chunk.window_index)?;
             metadata_dict.set_item("paragraph_count", chunk.paragraph_count)?;
             metadata_dict.set_item("paragraph_range", &para_range)?;
+            let page_range = PyList::new_bound(
+                py,
+                &[chunk.page_number as i64, chunk.end_page_number as i64],
+            );
+            metadata_dict.set_item("page_range", &page_range)?;
+            let doc_meta = PyDict::new_bound(py);
+            doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
+            metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &chunk.content)?;
@@ -1589,11 +1806,12 @@ pub fn chunk_pdf_page_aware(
     let doc = pdfium
         .load_pdf_from_file(file_path, None)
         .map_err(|e| PyIOError::new_err(format!("Failed to load PDF: {}", e)))?;
+    let total_pages = doc.pages().len();
 
     let spans = extract_spans_from_doc(&doc);
     if spans.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1602,7 +1820,7 @@ pub fn chunk_pdf_page_aware(
 
     if paragraph_records.is_empty() {
         return Err(PyRuntimeError::new_err(
-            "PDF appears to contain no extractable text",
+            "PDF appears to contain no extractable text. If this is a scanned or image-based PDF, consider running OCR preprocessing before chunking.",
         ));
     }
 
@@ -1625,6 +1843,7 @@ pub fn chunk_pdf_page_aware(
 
             let doc_meta = PyDict::new_bound(py);
             doc_meta.set_item("source_type", "pdf")?;
+            doc_meta.set_item("total_pages", total_pages)?;
             metadata_dict.set_item("document_metadata", &doc_meta)?;
 
             let dict = PyDict::new_bound(py);
@@ -1641,13 +1860,13 @@ pub fn chunk_pdf_page_aware(
     Ok(result.into_any().unbind())
 }
 
-pub fn register(m: &pyo3::Bound<'_, PyModule>) -> pyo3::PyResult<()> {
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_fast, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_section, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_semantic, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_sentence, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_sliding_window, m)?)?;
-    m.add_function(pyo3::wrap_pyfunction!(chunk_pdf_page_aware, m)?)?;
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(chunk_pdf_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_section, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_semantic, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_sentence, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_sliding_window, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_page_aware, m)?)?;
     Ok(())
 }

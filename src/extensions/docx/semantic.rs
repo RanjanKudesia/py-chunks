@@ -3,15 +3,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
-use quick_xml::events::Event;
-use quick_xml::name::QName;
-use quick_xml::Reader;
 use serde_json::{json, Value};
+
+use super::common::{
+    collapse_whitespace, docx_heading_level, parse_docx_blocks, DocxBlock, DocxBlockKind,
+};
 use std::collections::HashSet;
 use std::fs;
-use std::io::{BufReader, Cursor, Read};
 use std::time::Instant;
-use zip::ZipArchive;
 
 const MAX_CHUNK_CHARS: usize = 1500;
 const SHORT_PARAGRAPH_CHARS: usize = 80;
@@ -36,16 +35,21 @@ const TRANSITION_STARTS: [&str; 12] = [
     "hence",
 ];
 
-const STOPWORDS: [&str; 24] = [
-    "the", "and", "for", "are", "was", "were", "this", "that", "with", "from", "have", "been",
-    "will", "they", "their", "which", "about", "into", "more", "also", "when", "than", "those",
-    "these",
-];
+use super::super::shared::STOPWORDS;
+
+#[derive(Debug, Clone)]
+struct SemanticParagraph {
+    text: String,
+    is_heading: bool,
+    heading_level: Option<u32>,
+}
 
 #[derive(Debug, Clone)]
 struct SemanticChunk {
     paragraphs: Vec<String>,
     merge_reason: &'static str,
+    section_heading: Option<String>,
+    section_heading_level: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -66,11 +70,11 @@ fn chunk_docx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
         .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
 
     let rust_start = Instant::now();
-    let paragraphs = parse_docx_paragraphs(&bytes)
+    let raw_blocks = parse_docx_blocks(&bytes)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let paragraphs = lower_blocks_to_paragraphs(raw_blocks);
     let chunks_raw = build_semantic_chunks(paragraphs);
     let rust_ms = rust_start.elapsed().as_secs_f64() * 1000.0;
-
     let chunk_list: Vec<PyObject> = chunks_raw
         .into_iter()
         .map(|c| {
@@ -88,183 +92,69 @@ fn chunk_docx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     Ok(result.into_any().unbind())
 }
 
-fn parse_docx_paragraphs(bytes: &[u8]) -> Result<Vec<String>, String> {
-    let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("DOCX is not a valid zip archive: {e}"))?;
+fn lower_blocks_to_paragraphs(raw: Vec<DocxBlock>) -> Vec<SemanticParagraph> {
+    let mut out: Vec<SemanticParagraph> = Vec::with_capacity(raw.len());
 
-    let mut document_xml_file = archive
-        .by_name("word/document.xml")
-        .map_err(|_| "word/document.xml not found in DOCX".to_string())?;
-
-    parse_document_xml_paragraphs_streaming(&mut document_xml_file)
-}
-
-fn qname_eq(name: QName<'_>, expected: &[u8]) -> bool {
-    let n = name.as_ref();
-    n == expected || n.rsplit(|b| *b == b':').next() == Some(expected)
-}
-
-fn push_text(target: &mut String, piece: &str) {
-    let trimmed = piece.trim();
-    if trimmed.is_empty() {
-        return;
-    }
-    if !target.is_empty() {
-        target.push(' ');
-    }
-    target.push_str(trimmed);
-}
-
-fn parse_document_xml_paragraphs_streaming<R: Read>(reader_src: R) -> Result<Vec<String>, String> {
-    let mut reader = Reader::from_reader(BufReader::new(reader_src));
-
-    let mut buf = Vec::new();
-    let mut paragraphs = Vec::new();
-
-    let mut in_table = false;
-    let mut in_cell = false;
-    let mut in_text = false;
-    let mut in_paragraph = false;
-
-    let mut para_text = String::new();
-    let mut para_is_list = false;
-    let mut para_has_drawing = false;
-
-    let mut table_rows: Vec<String> = Vec::new();
-    let mut row_cells: Vec<String> = Vec::new();
-    let mut cell_text = String::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"tbl") {
-                    in_table = true;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"tr") && in_table {
-                    row_cells.clear();
-                } else if qname_eq(name, b"tc") && in_table {
-                    in_cell = true;
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") {
-                    if !in_table {
-                        in_paragraph = true;
-                        para_text.clear();
-                        para_is_list = false;
-                        para_has_drawing = false;
-                    }
-                } else if qname_eq(name, b"numPr") && in_paragraph {
-                    para_is_list = true;
-                } else if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                } else if qname_eq(name, b"t") {
-                    in_text = true;
+    for block in raw {
+        match block.kind {
+            DocxBlockKind::Table => {
+                let table_text = block.text.trim().to_string();
+                if !table_text.is_empty() {
+                    out.push(SemanticParagraph {
+                        text: table_text,
+                        is_heading: false,
+                        heading_level: None,
+                    });
                 }
             }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"numPr") && in_paragraph {
-                    para_is_list = true;
-                } else if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"t") {
-                    in_text = false;
-                } else if qname_eq(name, b"tc") && in_table {
-                    let cell = cell_text.trim().to_string();
-                    if !cell.is_empty() {
-                        row_cells.push(cell);
-                    }
-                    cell_text.clear();
-                    in_cell = false;
-                } else if qname_eq(name, b"tr") && in_table {
-                    if !row_cells.is_empty() {
-                        table_rows.push(row_cells.join(" | "));
-                    }
-                    row_cells.clear();
-                } else if qname_eq(name, b"tbl") && in_table {
-                    let table_text = table_rows.join("\n").trim().to_string();
-                    if !table_text.is_empty() {
-                        paragraphs.push(table_text);
-                    }
-                    in_table = false;
-                    in_cell = false;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") && in_paragraph {
-                    let text = para_text.trim().to_string();
-                    if !text.is_empty() || para_has_drawing {
-                        let normalized = if !text.is_empty() {
-                            if para_is_list {
-                                format!("- {text}")
-                            } else {
-                                text
-                            }
-                        } else {
-                            "[Image]".to_string()
-                        };
-                        paragraphs.push(normalized);
-                    }
-
-                    in_paragraph = false;
-                    para_text.clear();
-                    para_is_list = false;
-                    para_has_drawing = false;
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_text {
-                    let txt = match t.decode() {
-                        Ok(v) => v.into_owned(),
-                        Err(_) => String::new(),
+            DocxBlockKind::Paragraph => {
+                let heading_level =
+                    docx_heading_level(block.heading_style.as_deref(), block.outline_level);
+                let is_heading = heading_level.is_some();
+                let text = block.text.trim().to_string();
+                if !text.is_empty() {
+                    let normalized = if block.is_list {
+                        format!("- {text}")
+                    } else {
+                        text
                     };
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
+                    out.push(SemanticParagraph {
+                        text: normalized,
+                        is_heading,
+                        heading_level,
+                    });
+                } else if block.has_drawing {
+                    out.push(SemanticParagraph {
+                        text: super::common::image_placeholder(block.image_alt.as_deref()),
+                        is_heading: false,
+                        heading_level: None,
+                    });
                 }
             }
-            Ok(Event::CData(t)) => {
-                if in_text {
-                    let txt = String::from_utf8_lossy(t.as_ref());
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Failed to parse word/document.xml stream: {e}")),
-            _ => {}
         }
-        buf.clear();
     }
 
-    Ok(paragraphs)
+    out
 }
 
-fn build_semantic_chunks(paragraphs: Vec<String>) -> Vec<ChunkRecordInput> {
-    let cleaned: Vec<String> = paragraphs
+fn build_semantic_chunks(paragraphs: Vec<SemanticParagraph>) -> Vec<ChunkRecordInput> {
+    let cleaned: Vec<SemanticParagraph> = paragraphs
         .into_iter()
-        .map(|p| collapse_whitespace(&p))
-        .filter(|p| !p.is_empty())
+        .map(|p| SemanticParagraph {
+            text: collapse_whitespace(&p.text),
+            is_heading: p.is_heading,
+            heading_level: p.heading_level,
+        })
+        .filter(|p| !p.text.is_empty())
         .collect();
 
     if cleaned.is_empty() {
         return Vec::new();
     }
 
-    let semantic_chunks =
-        prune_small_short_chunks(merge_heading_singletons(group_semantic_chunks(cleaned)));
+    let semantic_chunks = prune_small_short_chunks(propagate_section_headings(
+        merge_heading_singletons(group_semantic_chunks(cleaned)),
+    ));
     semantic_chunks
         .into_iter()
         .map(|chunk| {
@@ -272,7 +162,8 @@ fn build_semantic_chunks(paragraphs: Vec<String>) -> Vec<ChunkRecordInput> {
             ChunkRecordInput {
                 content,
                 metadata: json!({
-                    "section_heading": Value::Null,
+                    "section_heading": chunk.section_heading,
+                    "section_heading_level": chunk.section_heading_level,
                     "paragraph_count": chunk.paragraphs.len(),
                     "merge_reason": chunk.merge_reason,
                     "document_metadata": {
@@ -286,16 +177,26 @@ fn build_semantic_chunks(paragraphs: Vec<String>) -> Vec<ChunkRecordInput> {
 
 fn merge_heading_singletons(chunks: Vec<SemanticChunk>) -> Vec<SemanticChunk> {
     let mut merged: Vec<SemanticChunk> = Vec::new();
-    let mut pending_heading: Option<String> = None;
+    let mut pending_heading: Option<(String, Option<u32>)> = None;
 
     for mut chunk in chunks {
         if is_heading_singleton(&chunk) {
-            pending_heading = chunk.paragraphs.into_iter().next();
+            pending_heading = chunk
+                .paragraphs
+                .into_iter()
+                .next()
+                .map(|heading| (heading, chunk.section_heading_level));
             continue;
         }
 
-        if let Some(heading) = pending_heading.take() {
+        if let Some((heading, heading_level)) = pending_heading.take() {
             if has_actual_body_content(&chunk) {
+                if chunk.section_heading.is_none() {
+                    chunk.section_heading = Some(heading.clone());
+                }
+                if chunk.section_heading_level.is_none() {
+                    chunk.section_heading_level = heading_level;
+                }
                 let mut paragraphs = vec![heading];
                 paragraphs.extend(chunk.paragraphs);
                 chunk.paragraphs = paragraphs;
@@ -313,14 +214,36 @@ fn prune_small_short_chunks(chunks: Vec<SemanticChunk>) -> Vec<SemanticChunk> {
     chunks
         .into_iter()
         .filter(|chunk| {
-            !(chunk.merge_reason == "short_paragraph"
-                && chunk.paragraphs.join("\n\n").len() < MIN_SHORT_MERGE_OUTPUT_CHARS)
+            if chunk.merge_reason != "short_paragraph" {
+                return true;
+            }
+            // Multi-paragraph short chunks were worth grouping — always keep them.
+            if chunk.paragraphs.len() > 1 {
+                return true;
+            }
+            chunk.paragraphs.join("\n\n").len() >= MIN_SHORT_MERGE_OUTPUT_CHARS
         })
         .collect()
 }
 
+fn propagate_section_headings(mut chunks: Vec<SemanticChunk>) -> Vec<SemanticChunk> {
+    let mut last_heading: Option<String> = None;
+    let mut last_level: Option<u32> = None;
+    for chunk in &mut chunks {
+        if chunk.section_heading.is_some() {
+            last_heading = chunk.section_heading.clone();
+            last_level = chunk.section_heading_level;
+        } else if last_heading.is_some() {
+            chunk.section_heading = last_heading.clone();
+            chunk.section_heading_level = last_level;
+        }
+    }
+    chunks
+}
+
 fn is_heading_singleton(chunk: &SemanticChunk) -> bool {
-    chunk.paragraphs.len() == 1 && chunk.paragraphs[0].len() < 30
+    chunk.paragraphs.len() == 1
+        && (chunk.merge_reason == "docx_heading" || chunk.paragraphs[0].len() < 30)
 }
 
 fn has_actual_body_content(chunk: &SemanticChunk) -> bool {
@@ -341,16 +264,43 @@ fn has_actual_body_content(chunk: &SemanticChunk) -> bool {
     chunk.paragraphs.join("\n\n").len() > 50
 }
 
-fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
+fn group_semantic_chunks(paragraphs: Vec<SemanticParagraph>) -> Vec<SemanticChunk> {
     let mut chunks = Vec::new();
+    let first = &paragraphs[0];
     let mut current = SemanticChunk {
-        paragraphs: vec![paragraphs[0].clone()],
-        merge_reason: "keyword_overlap",
+        paragraphs: vec![first.text.clone()],
+        merge_reason: if first.is_heading {
+            "docx_heading"
+        } else {
+            "keyword_overlap"
+        },
+        section_heading: None,
+        section_heading_level: if first.is_heading {
+            first.heading_level
+        } else {
+            None
+        },
     };
 
     let mut force_merge_next = false;
 
-    for para in paragraphs.iter().skip(1) {
+    for sp in paragraphs.iter().skip(1) {
+        let para = &sp.text;
+        // Real DOCX heading paragraph always breaks and becomes its own
+        // singleton chunk so `merge_heading_singletons` can attach it to the
+        // following body content.
+        if sp.is_heading {
+            chunks.push(current);
+            current = SemanticChunk {
+                paragraphs: vec![para.clone()],
+                merge_reason: "docx_heading",
+                section_heading: None,
+                section_heading_level: sp.heading_level,
+            };
+            force_merge_next = false;
+            continue;
+        }
+
         let para_is_short = is_short_paragraph(para);
         let mut merge = false;
         let mut merge_reason = current.merge_reason;
@@ -370,6 +320,14 @@ fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
         }
 
         if merge {
+            // When the first merge into a heading-only chunk happens, capture the
+            // heading text as section_heading before the merge_reason gets overwritten.
+            if current.paragraphs.len() == 1
+                && current.merge_reason == "docx_heading"
+                && current.section_heading.is_none()
+            {
+                current.section_heading = Some(current.paragraphs[0].clone());
+            }
             let merged_len = chunk_content_len(&current.paragraphs) + 2 + para.len();
             if merged_len > MAX_CHUNK_CHARS {
                 current.merge_reason = "size_limit";
@@ -377,6 +335,8 @@ fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
                 current = SemanticChunk {
                     paragraphs: vec![para.clone()],
                     merge_reason: "size_limit",
+                    section_heading: None,
+                    section_heading_level: None,
                 };
                 force_merge_next = para_is_short && para.contains(' ');
                 continue;
@@ -394,6 +354,8 @@ fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
             current = SemanticChunk {
                 paragraphs: vec![para.clone()],
                 merge_reason: reason,
+                section_heading: None,
+                section_heading_level: None,
             };
             force_merge_next = para_is_short && para.contains(' ');
             continue;
@@ -404,6 +366,8 @@ fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
             current = SemanticChunk {
                 paragraphs: vec![para.clone()],
                 merge_reason: "short_paragraph",
+                section_heading: None,
+                section_heading_level: None,
             };
             force_merge_next = para.contains(' ');
             continue;
@@ -413,6 +377,8 @@ fn group_semantic_chunks(paragraphs: Vec<String>) -> Vec<SemanticChunk> {
         current = SemanticChunk {
             paragraphs: vec![para.clone()],
             merge_reason: "keyword_overlap",
+            section_heading: None,
+            section_heading_level: None,
         };
         force_merge_next = false;
     }
@@ -489,25 +455,6 @@ fn extract_keywords(text: &str) -> HashSet<String> {
         .collect()
 }
 
-fn collapse_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_space = false;
-
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            if !in_space {
-                out.push(' ');
-                in_space = true;
-            }
-        } else {
-            out.push(ch);
-            in_space = false;
-        }
-    }
-
-    out.trim().to_string()
-}
-
 fn chunk_content_len(paragraphs: &[String]) -> usize {
     if paragraphs.is_empty() {
         return 0;
@@ -515,7 +462,54 @@ fn chunk_content_len(paragraphs: &[String]) -> usize {
     paragraphs.iter().map(|p| p.len()).sum::<usize>() + ((paragraphs.len() - 1) * 2)
 }
 
+#[pyclass]
+pub struct DocxSemanticIterator {
+    chunks: Vec<ChunkRecordInput>,
+    index: usize,
+}
+
+#[pymethods]
+impl DocxSemanticIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if self.index >= self.chunks.len() {
+            return Ok(None);
+        }
+        let chunk = &self.chunks[self.index];
+        self.index += 1;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("content", &chunk.content)?;
+        dict.set_item("content_type", "semantic")?;
+        dict.set_item("metadata", pythonize(py, &chunk.metadata)?)?;
+        Ok(Some(dict.into_any().unbind()))
+    }
+}
+
+#[pyfunction]
+fn chunk_docx_semantic_stream(file_path: &str) -> PyResult<DocxSemanticIterator> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let raw_blocks = parse_docx_blocks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let paragraphs = lower_blocks_to_paragraphs(raw_blocks);
+    let chunks = build_semantic_chunks(paragraphs);
+
+    Ok(DocxSemanticIterator { chunks, index: 0 })
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx_semantic, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_semantic_stream, m)?)?;
+    m.add_class::<DocxSemanticIterator>()?;
     Ok(())
 }

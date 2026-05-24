@@ -1,3 +1,6 @@
+// Re-export shared split_sentences so pdf submodules keep the same import path.
+pub use super::super::shared::split_sentences;
+
 pub const MAX_CHUNK_CHARS: usize = 1200;
 pub const MIN_CHUNK_CHARS: usize = 350;
 
@@ -15,6 +18,15 @@ pub enum ContentType {
 pub struct Paragraph {
     pub text: String,
     pub is_heading: bool,
+    pub kind: ParagraphKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParagraphKind {
+    Plain,
+    Heading,
+    BulletList,
+    Table,
 }
 
 #[derive(Debug)]
@@ -64,10 +76,18 @@ pub fn build_paragraph(lines: Vec<String>) -> Option<Paragraph> {
     }
 
     let is_bullet = is_bullet_line(&lines[0]) || is_numbered_line(&lines[0]);
+    let is_table = !is_bullet && is_table_block(&lines);
     let joined = lines.join(" ");
-    let is_heading = !is_bullet && is_heading_block(&joined, &lines);
+    let is_heading = !is_table && !is_bullet && is_heading_block(&joined, &lines);
 
-    let text = if is_bullet {
+    let text = if is_table {
+        lines
+            .iter()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else if is_bullet {
         merge_bullet_lines(&lines).join("\n")
     } else if is_heading {
         lines.join("\n")
@@ -80,7 +100,21 @@ pub fn build_paragraph(lines: Vec<String>) -> Option<Paragraph> {
         return None;
     }
 
-    Some(Paragraph { text, is_heading })
+    let kind = if is_table {
+        ParagraphKind::Table
+    } else if is_bullet {
+        ParagraphKind::BulletList
+    } else if is_heading {
+        ParagraphKind::Heading
+    } else {
+        ParagraphKind::Plain
+    };
+
+    Some(Paragraph {
+        text,
+        is_heading,
+        kind,
+    })
 }
 
 pub fn build_units(paragraphs: Vec<Paragraph>) -> Vec<ChunkUnit> {
@@ -176,6 +210,14 @@ pub fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
     let mut current_len: usize = 0;
 
     for part in &unit.parts {
+        let part_is_table = is_table_text(part);
+
+        if part_is_table && !current_parts.is_empty() {
+            chunks.push(current_parts.join("\n").trim().to_string());
+            current_parts.clear();
+            current_len = 0;
+        }
+
         if part.len() > max_chars {
             if !current_parts.is_empty() {
                 chunks.push(current_parts.join("\n").trim().to_string());
@@ -183,6 +225,11 @@ pub fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
                 current_len = 0;
             }
             chunks.extend(split_large_text(part, max_chars));
+            continue;
+        }
+
+        if part_is_table {
+            chunks.push(part.trim().to_string());
             continue;
         }
 
@@ -209,6 +256,10 @@ pub fn split_unit(unit: &ChunkUnit, max_chars: usize) -> Vec<String> {
 }
 
 pub fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
+    if is_table_text(text) {
+        return split_table_text(text, max_chars);
+    }
+
     if text.len() <= max_chars {
         return vec![text.trim().to_string()];
     }
@@ -253,31 +304,137 @@ pub fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
-pub fn split_sentences(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
+// split_sentences — re-exported from super::super::shared above.
 
-    while i < len {
-        current.push(chars[i]);
-        if matches!(chars[i], '.' | '!' | '?') && i + 1 < len && chars[i + 1].is_whitespace() {
-            let s = current.trim().to_string();
-            if !s.is_empty() {
-                out.push(s);
-            }
-            current.clear();
+pub fn split_table_text(text: &str, max_chars: usize) -> Vec<String> {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    if text.len() <= max_chars || lines.len() == 1 {
+        return vec![text.trim().to_string()];
+    }
+
+    let header = detect_table_header(&lines);
+    let header_prefix = header.map(|line| format!("{line}\n")).unwrap_or_default();
+    let start_idx = usize::from(header.is_some());
+
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current_rows: Vec<String> = Vec::new();
+    let mut current_len = 0usize;
+
+    for row in lines.iter().skip(start_idx) {
+        let sep = if current_rows.is_empty() { 0 } else { 1 };
+        let candidate_len = header_prefix.len() + current_len + sep + row.len();
+
+        if !current_rows.is_empty() && candidate_len > max_chars {
+            chunks.push(
+                format!("{}{}", header_prefix, current_rows.join("\n"))
+                    .trim()
+                    .to_string(),
+            );
+            current_rows.clear();
+            current_len = 0;
         }
-        i += 1;
+
+        if row.len()
+            > max_chars
+                .saturating_sub(header_prefix.len())
+                .max(max_chars / 2)
+        {
+            let row_chunks =
+                split_plain_text(row, max_chars.saturating_sub(header_prefix.len()).max(200));
+            for (idx, row_chunk) in row_chunks.into_iter().enumerate() {
+                if idx == 0 && current_rows.is_empty() {
+                    current_rows.push(row_chunk.clone());
+                    current_len = row_chunk.len();
+                } else {
+                    if !current_rows.is_empty() {
+                        chunks.push(
+                            format!("{}{}", header_prefix, current_rows.join("\n"))
+                                .trim()
+                                .to_string(),
+                        );
+                        current_rows.clear();
+                    }
+                    chunks.push(format!("{}{}", header_prefix, row_chunk).trim().to_string());
+                    current_len = 0;
+                }
+            }
+            continue;
+        }
+
+        current_len += sep + row.len();
+        current_rows.push(row.clone());
     }
 
-    let tail = current.trim().to_string();
-    if !tail.is_empty() {
-        out.push(tail);
+    if current_rows.is_empty() && chunks.is_empty() {
+        return vec![text.trim().to_string()];
     }
 
-    out
+    if !current_rows.is_empty() {
+        chunks.push(
+            format!("{}{}", header_prefix, current_rows.join("\n"))
+                .trim()
+                .to_string(),
+        );
+    }
+
+    chunks
+        .into_iter()
+        .filter(|chunk| !chunk.is_empty())
+        .collect()
+}
+
+fn split_plain_text(text: &str, max_chars: usize) -> Vec<String> {
+    if text.len() <= max_chars {
+        return vec![text.trim().to_string()];
+    }
+
+    let sentences = split_sentences(text);
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for sentence in sentences {
+        let candidate = if current.is_empty() {
+            sentence.clone()
+        } else {
+            format!("{current} {sentence}")
+        };
+
+        if candidate.len() <= max_chars {
+            current = candidate;
+        } else {
+            if !current.is_empty() {
+                chunks.push(current.trim().to_string());
+            }
+            current = sentence;
+            while current.len() > max_chars {
+                let split_at = current[..max_chars]
+                    .rfind(' ')
+                    .unwrap_or(max_chars / 2)
+                    .max(max_chars / 2);
+                chunks.push(current[..split_at].trim().to_string());
+                current = current[split_at..].trim().to_string();
+            }
+        }
+    }
+
+    if !current.trim().is_empty() {
+        chunks.push(current.trim().to_string());
+    }
+
+    if chunks.is_empty() {
+        vec![text.trim().to_string()]
+    } else {
+        chunks.into_iter().filter(|c| !c.is_empty()).collect()
+    }
 }
 
 pub fn classify_chunk(text: &str) -> ContentType {
@@ -285,7 +442,7 @@ pub fn classify_chunk(text: &str) -> ContentType {
         return ContentType::PlainParagraph;
     }
 
-    if text.starts_with("Table:") {
+    if text.starts_with("Table:") || is_table_text(text) {
         return ContentType::Table;
     }
 
@@ -371,28 +528,128 @@ pub fn is_heading_style(text: &str) -> bool {
     false
 }
 
+pub fn is_table_text(text: &str) -> bool {
+    let lines: Vec<String> = text
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+    is_table_block(&lines)
+}
+
+fn is_table_block(lines: &[String]) -> bool {
+    if lines.len() < 2 {
+        return false;
+    }
+
+    let pipe_rows = lines
+        .iter()
+        .filter(|line| line.matches('|').count() >= 2)
+        .count();
+    if pipe_rows >= 2 {
+        return true;
+    }
+
+    let candidate_rows: Vec<(usize, bool)> = lines
+        .iter()
+        .filter_map(|line| {
+            let count = table_token_count(line);
+            if count >= 3 && line.len() <= 160 {
+                Some((count, contains_numericish_token(line)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidate_rows.len() < 2 {
+        return false;
+    }
+
+    let min_cols = candidate_rows
+        .iter()
+        .map(|(count, _)| *count)
+        .min()
+        .unwrap_or(0);
+    let max_cols = candidate_rows
+        .iter()
+        .map(|(count, _)| *count)
+        .max()
+        .unwrap_or(0);
+    let numeric_rows = candidate_rows
+        .iter()
+        .filter(|(_, numeric)| *numeric)
+        .count();
+    let short_non_sentence_rows = lines
+        .iter()
+        .filter(|line| !looks_like_sentence(line))
+        .count();
+
+    max_cols.saturating_sub(min_cols) <= 2
+        && numeric_rows >= 2
+        && short_non_sentence_rows >= lines.len().saturating_sub(1)
+}
+
+fn table_token_count(line: &str) -> usize {
+    if line.contains('|') {
+        return line
+            .split('|')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .count();
+    }
+
+    line.split_whitespace()
+        .filter(|token| !token.is_empty())
+        .count()
+}
+
+fn contains_numericish_token(line: &str) -> bool {
+    line.split_whitespace().any(is_numericish_token)
+}
+
+fn is_numericish_token(token: &str) -> bool {
+    let stripped =
+        token.trim_matches(|c: char| matches!(c, ',' | '$' | '%' | '(' | ')' | '[' | ']'));
+
+    !stripped.is_empty()
+        && stripped.chars().any(|ch| ch.is_ascii_digit())
+        && stripped
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '/' | ':'))
+}
+
+fn detect_table_header(lines: &[String]) -> Option<&str> {
+    if lines.len() < 3 {
+        return None;
+    }
+
+    let first_numeric = contains_numericish_token(&lines[0]);
+    let following_numeric_rows = lines
+        .iter()
+        .skip(1)
+        .filter(|line| contains_numericish_token(line))
+        .count();
+
+    if !first_numeric && following_numeric_rows >= 2 {
+        Some(lines[0].as_str())
+    } else {
+        None
+    }
+}
+
 pub fn normalize_line(line: &str) -> String {
     line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub fn is_noise_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    lower.starts_with("copyright ")
-        || lower.contains("codewithmosh.com")
-        || is_standalone_number(line)
-        || is_page_marker(line)
+    lower.starts_with("copyright ") || is_standalone_number(line)
 }
 
 pub fn is_standalone_number(line: &str) -> bool {
     let t = line.trim();
     !t.is_empty() && t.len() <= 3 && t.chars().all(|c| c.is_ascii_digit())
-}
-
-pub fn is_page_marker(line: &str) -> bool {
-    if let Some(rest) = line.trim().strip_prefix("ML Engineer Roadmap ") {
-        return !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit());
-    }
-    false
 }
 
 pub fn is_toc_heading(line: &str) -> bool {
@@ -461,4 +718,3 @@ pub fn merge_bullet_lines(lines: &[String]) -> Vec<String> {
 
     merged
 }
-

@@ -3,29 +3,29 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
-use quick_xml::events::Event;
-use quick_xml::name::QName;
-use quick_xml::Reader;
 use serde_json::{json, Value};
+
+use super::common::{collapse_whitespace, parse_docx_indexed_paragraphs, IndexedParagraph};
 use std::fs;
-use std::io::{BufReader, Cursor, Read};
 use std::time::Instant;
-use zip::ZipArchive;
 
-const MIN_PARAGRAPH_CHARS: usize = 10;
+const TITLE_ABBREVIATIONS: [&str; 22] = [
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "st.", "capt.", "lt.",
+    "sgt.", "gen.", "col.", "rev.", "hon.", "gov.", "sen.", "rep.", "fig.", "vol.",
+];
 
-const TITLE_ABBREVIATIONS: [&str; 8] = ["mr.", "mrs.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc."];
-
-#[derive(Debug, Clone)]
-struct IndexedParagraph {
-    index: usize,
-    text: String,
-}
+/// Characters allowed to trail a terminal `.` / `?` / `!` and still count as
+/// part of the same sentence (closing quotes, parentheses, brackets).
+const SENTENCE_CLOSERS: &[char] = &['"', '\u{201D}', '\'', '\u{2019}', ')', ']'];
 
 #[derive(Debug, Clone)]
 struct IndexedSentence {
     paragraph_index: usize,
     text: String,
+    paragraph_is_heading: bool,
+    paragraph_heading_level: Option<u32>,
+    paragraph_is_list: bool,
+    paragraph_is_table: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,7 @@ fn chunk_docx_sentence(
         .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
 
     let rust_start = Instant::now();
-    let paragraphs = parse_docx_paragraphs(&bytes)
+    let paragraphs = parse_docx_indexed_paragraphs(&bytes)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
     let sentences = paragraphs
         .iter()
@@ -109,6 +109,10 @@ fn build_sentence_chunks(
                 "actual_sentence_count": window.len(),
                 "chunk_index": chunk_index,
                 "source_paragraph_index": window[0].paragraph_index,
+                "source_paragraph_is_heading": window[0].paragraph_is_heading,
+                "source_paragraph_heading_level": window[0].paragraph_heading_level,
+                "source_paragraph_is_list": window[0].paragraph_is_list,
+                "source_paragraph_is_table": window[0].paragraph_is_table,
                 "document_metadata": {
                     "source_type": "docx"
                 }
@@ -135,23 +139,29 @@ fn split_paragraph_sentences(paragraph: &IndexedParagraph) -> Vec<IndexedSentenc
 
     while i < len {
         let ch = chars[i];
-        if matches!(ch, '.' | '?' | '!') && should_split_at(&chars, i, ch) {
-            let sentence = chars[start..=i].iter().collect::<String>();
-            let sentence = collapse_whitespace(&sentence);
-            if !sentence.is_empty() {
-                out.push(IndexedSentence {
-                    paragraph_index: paragraph.index,
-                    text: sentence,
-                });
-            }
+        if matches!(ch, '.' | '?' | '!') {
+            if let Some(end_inclusive) = sentence_end_at(&chars, i, ch) {
+                let sentence = chars[start..=end_inclusive].iter().collect::<String>();
+                let sentence = collapse_whitespace(&sentence);
+                if !sentence.is_empty() {
+                    out.push(IndexedSentence {
+                        paragraph_index: paragraph.index,
+                        text: sentence,
+                        paragraph_is_heading: paragraph.is_heading,
+                        paragraph_heading_level: paragraph.heading_level,
+                        paragraph_is_list: paragraph.is_list,
+                        paragraph_is_table: paragraph.is_table,
+                    });
+                }
 
-            let mut next_start = i + 1;
-            while next_start < len && chars[next_start].is_whitespace() {
-                next_start += 1;
+                let mut next_start = end_inclusive + 1;
+                while next_start < len && chars[next_start].is_whitespace() {
+                    next_start += 1;
+                }
+                start = next_start;
+                i = next_start;
+                continue;
             }
-            start = next_start;
-            i = next_start;
-            continue;
         }
         i += 1;
     }
@@ -163,6 +173,10 @@ fn split_paragraph_sentences(paragraph: &IndexedParagraph) -> Vec<IndexedSentenc
             out.push(IndexedSentence {
                 paragraph_index: paragraph.index,
                 text: tail,
+                paragraph_is_heading: paragraph.is_heading,
+                paragraph_heading_level: paragraph.heading_level,
+                paragraph_is_list: paragraph.is_list,
+                paragraph_is_table: paragraph.is_table,
             });
         }
     }
@@ -170,26 +184,39 @@ fn split_paragraph_sentences(paragraph: &IndexedParagraph) -> Vec<IndexedSentenc
     out
 }
 
-fn should_split_at(chars: &[char], punct_idx: usize, punct: char) -> bool {
-    if punct_idx + 2 >= chars.len() {
-        return false;
+/// Determine whether a `.` / `?` / `!` at `punct_idx` ends a sentence, and if
+/// so, return the inclusive end index (which may be past `punct_idx` when
+/// trailing closing quotes/parens belong to the current sentence).
+fn sentence_end_at(chars: &[char], punct_idx: usize, punct: char) -> Option<usize> {
+    // Walk over any trailing closing quotes/parens that should stay with the
+    // current sentence (e.g. `He said "Hello." Then left.`).
+    let mut end = punct_idx;
+    let mut after = punct_idx + 1;
+    while after < chars.len() && SENTENCE_CLOSERS.contains(&chars[after]) {
+        end = after;
+        after += 1;
     }
 
-    if chars[punct_idx + 1] != ' ' || !chars[punct_idx + 2].is_uppercase() {
-        return false;
+    // Need at least one whitespace + uppercase letter after the (possibly
+    // extended) sentence end to count as a boundary.
+    if after + 1 >= chars.len() {
+        return None;
+    }
+    if chars[after] != ' ' || !chars[after + 1].is_uppercase() {
+        return None;
     }
 
     if punct == '.' {
         let prefix = chars[..=punct_idx].iter().collect::<String>();
         if ends_with_title_abbreviation(&prefix)
-            || ends_with_numeric_marker(&prefix)
+            || ends_with_list_marker(&prefix)
             || ends_with_initials_abbreviation(&prefix)
         {
-            return false;
+            return None;
         }
     }
 
-    true
+    Some(end)
 }
 
 fn ends_with_title_abbreviation(prefix: &str) -> bool {
@@ -197,15 +224,24 @@ fn ends_with_title_abbreviation(prefix: &str) -> bool {
     TITLE_ABBREVIATIONS.iter().any(|abbr| lower.ends_with(abbr))
 }
 
-fn ends_with_numeric_marker(prefix: &str) -> bool {
+/// True when `prefix` ends with a short numeric list/ordinal marker such as
+/// `1.`, `12.`, or `999.`. Restricted to 1–3 digit tokens so that years
+/// (`1985.`) and longer numbers still terminate sentences correctly.
+fn ends_with_list_marker(prefix: &str) -> bool {
     let trimmed = prefix.trim_end();
-    let without_dot = trimmed.strip_suffix('.').unwrap_or(trimmed);
+    let without_dot = match trimmed.strip_suffix('.') {
+        Some(s) => s,
+        None => return false,
+    };
     let token = without_dot
         .split_whitespace()
         .last()
         .unwrap_or_default()
         .trim();
-    !token.is_empty() && token.chars().all(|c| c.is_ascii_digit())
+    if token.is_empty() || token.len() > 3 {
+        return false;
+    }
+    token.chars().all(|c| c.is_ascii_digit())
 }
 
 fn ends_with_initials_abbreviation(prefix: &str) -> bool {
@@ -239,195 +275,65 @@ fn ends_with_initials_abbreviation(prefix: &str) -> bool {
     groups >= 2
 }
 
-fn parse_docx_paragraphs(bytes: &[u8]) -> Result<Vec<IndexedParagraph>, String> {
-    let cursor = Cursor::new(bytes);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("DOCX is not a valid zip archive: {e}"))?;
-
-    let mut document_xml_file = archive
-        .by_name("word/document.xml")
-        .map_err(|_| "word/document.xml not found in DOCX".to_string())?;
-
-    parse_document_xml_paragraphs_streaming(&mut document_xml_file)
+#[pyclass]
+pub struct DocxSentenceIterator {
+    chunks: Vec<ChunkRecordInput>,
+    index: usize,
 }
 
-fn qname_eq(name: QName<'_>, expected: &[u8]) -> bool {
-    let n = name.as_ref();
-    n == expected || n.rsplit(|b| *b == b':').next() == Some(expected)
-}
-
-fn push_text(target: &mut String, piece: &str) {
-    let trimmed = piece.trim();
-    if trimmed.is_empty() {
-        return;
+#[pymethods]
+impl DocxSentenceIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
     }
-    if !target.is_empty() {
-        target.push(' ');
-    }
-    target.push_str(trimmed);
-}
 
-fn parse_document_xml_paragraphs_streaming<R: Read>(
-    reader_src: R,
-) -> Result<Vec<IndexedParagraph>, String> {
-    let mut reader = Reader::from_reader(BufReader::new(reader_src));
-
-    let mut buf = Vec::new();
-    let mut paragraphs = Vec::new();
-
-    let mut in_table = false;
-    let mut in_cell = false;
-    let mut in_text = false;
-    let mut in_paragraph = false;
-
-    let mut para_text = String::new();
-    let mut para_has_drawing = false;
-
-    let mut table_rows: Vec<String> = Vec::new();
-    let mut row_cells: Vec<String> = Vec::new();
-    let mut cell_text = String::new();
-    let mut paragraph_index = 0usize;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"tbl") {
-                    in_table = true;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"tr") && in_table {
-                    row_cells.clear();
-                } else if qname_eq(name, b"tc") && in_table {
-                    in_cell = true;
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") {
-                    if !in_table {
-                        in_paragraph = true;
-                        para_text.clear();
-                        para_has_drawing = false;
-                    }
-                } else if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                } else if qname_eq(name, b"t") {
-                    in_text = true;
-                }
-            }
-            Ok(Event::Empty(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"drawing") && in_paragraph {
-                    para_has_drawing = true;
-                }
-            }
-            Ok(Event::End(e)) => {
-                let name = e.name();
-                if qname_eq(name, b"t") {
-                    in_text = false;
-                } else if qname_eq(name, b"tc") && in_table {
-                    let cell = cell_text.trim().to_string();
-                    if !cell.is_empty() {
-                        row_cells.push(cell);
-                    }
-                    cell_text.clear();
-                    in_cell = false;
-                } else if qname_eq(name, b"tr") && in_table {
-                    if !row_cells.is_empty() {
-                        table_rows.push(row_cells.join(" | "));
-                    }
-                    row_cells.clear();
-                } else if qname_eq(name, b"tbl") && in_table {
-                    let table_text = collapse_whitespace(&table_rows.join("\n"))
-                        .trim()
-                        .to_string();
-                    if table_text.len() >= MIN_PARAGRAPH_CHARS {
-                        paragraphs.push(IndexedParagraph {
-                            index: paragraph_index,
-                            text: table_text,
-                        });
-                        paragraph_index += 1;
-                    }
-                    in_table = false;
-                    in_cell = false;
-                    table_rows.clear();
-                    row_cells.clear();
-                    cell_text.clear();
-                } else if qname_eq(name, b"p") && in_paragraph {
-                    let text = collapse_whitespace(&para_text);
-                    let normalized = if !text.is_empty() {
-                        text
-                    } else if para_has_drawing {
-                        "[Image]".to_string()
-                    } else {
-                        String::new()
-                    };
-
-                    if normalized.len() >= MIN_PARAGRAPH_CHARS {
-                        paragraphs.push(IndexedParagraph {
-                            index: paragraph_index,
-                            text: normalized,
-                        });
-                        paragraph_index += 1;
-                    }
-
-                    in_paragraph = false;
-                    para_text.clear();
-                    para_has_drawing = false;
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_text {
-                    let txt = match t.decode() {
-                        Ok(v) => v.into_owned(),
-                        Err(_) => String::new(),
-                    };
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
-                }
-            }
-            Ok(Event::CData(t)) => {
-                if in_text {
-                    let txt = String::from_utf8_lossy(t.as_ref());
-                    if in_table && in_cell {
-                        push_text(&mut cell_text, &txt);
-                    } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(format!("Failed to parse word/document.xml stream: {e}")),
-            _ => {}
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        if self.index >= self.chunks.len() {
+            return Ok(None);
         }
-        buf.clear();
+        let chunk = &self.chunks[self.index];
+        self.index += 1;
+        let dict = PyDict::new_bound(py);
+        dict.set_item("content", &chunk.content)?;
+        dict.set_item("content_type", "sentence")?;
+        dict.set_item("metadata", pythonize(py, &chunk.metadata)?)?;
+        Ok(Some(dict.into_any().unbind()))
     }
-
-    Ok(paragraphs)
 }
 
-fn collapse_whitespace(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_space = false;
-
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            if !in_space {
-                out.push(' ');
-                in_space = true;
-            }
-        } else {
-            out.push(ch);
-            in_space = false;
-        }
+#[pyfunction]
+fn chunk_docx_sentence_stream(
+    file_path: &str,
+    sentences_per_chunk: usize,
+) -> PyResult<DocxSentenceIterator> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+    if sentences_per_chunk == 0 {
+        return Err(PyValueError::new_err(
+            "sentences_per_chunk must be greater than 0",
+        ));
     }
 
-    out.trim().to_string()
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let paragraphs = parse_docx_indexed_paragraphs(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let sentences = paragraphs
+        .iter()
+        .flat_map(|paragraph| split_paragraph_sentences(paragraph))
+        .collect::<Vec<_>>();
+    let chunks = build_sentence_chunks(sentences, sentences_per_chunk);
+
+    Ok(DocxSentenceIterator { chunks, index: 0 })
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx_sentence, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_sentence_stream, m)?)?;
+    m.add_class::<DocxSentenceIterator>()?;
     Ok(())
 }
