@@ -24,7 +24,7 @@ jobs:
           - os: macos-14          # Apple Silicon
             target: aarch64-apple-darwin
             pdfium_artifact: pdfium-mac-arm64
-          - os: macos-13          # Intel
+          - os: macos-15-intel    # Intel (macos-13 retired Dec 2025)
             target: x86_64-apple-darwin
             pdfium_artifact: pdfium-mac-x64
 
