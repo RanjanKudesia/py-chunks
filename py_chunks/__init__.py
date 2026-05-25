@@ -6,6 +6,7 @@ URLs.
 """
 
 import os
+import sys
 import tempfile
 from os import PathLike, fspath
 from pathlib import Path
@@ -13,11 +14,30 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-# Register the package directory so the Rust layer can find a bundled
-# libpdfium binary (libpdfium.dylib / pdfium.dll / libpdfium.so) placed
-# alongside _rust.so inside this directory.  Must be set before any Rust
-# symbol that calls get_pdfium() is first invoked.
-os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(Path(__file__).parent))
+_pkg_dir = Path(__file__).parent
+
+# Tell the Rust layer where to find the bundled PDFium binary.
+os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(_pkg_dir))
+
+# Directly resolve the bundled binary and set PDFIUM_LIBRARY_PATH to its
+# absolute path.  This hits the highest-priority branch in the Rust resolver
+# so no directory scanning is needed — the path is always exact.
+_PDFIUM_NAMES = {
+    "win32":  "pdfium.dll",
+    "darwin": "libpdfium.dylib",
+    "linux":  "libpdfium.so",
+}
+_pdfium_bin = _pkg_dir / _PDFIUM_NAMES.get(sys.platform, "")
+if _pdfium_bin.exists():
+    os.environ.setdefault("PDFIUM_LIBRARY_PATH", str(_pdfium_bin))
+
+# On Windows, register the package directory as a DLL search directory so
+# pdfium.dll's own dependencies (vcruntime140.dll, msvcp140.dll …) are found
+# in py_chunks/ rather than failing with LoadLibrary error 126.
+# os.add_dll_directory() wraps AddDllDirectory() — available on Python 3.8+,
+# which we always satisfy (requires-python = ">=3.9").
+if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+    os.add_dll_directory(str(_pkg_dir))
 
 from .chunkers.docx import chunk_docx, stream_chunk_docx
 from .chunkers.html import chunk_html, stream_chunk_html
