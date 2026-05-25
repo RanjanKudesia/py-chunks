@@ -2,6 +2,9 @@
 py_chunks/libpdfium.dylib
 py_chunks/libpdfium.so
 py_chunks/pdfium.dll
+py_chunks/vcruntime140.dll
+py_chunks/msvcp140.dll
+py_chunks/vcruntime140_1.dll
 
 # Python artifacts
 __pycache__/

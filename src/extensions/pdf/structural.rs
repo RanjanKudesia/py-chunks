@@ -434,6 +434,14 @@ pub(super) fn get_pdfium() -> Result<Pdfium, String> {
             add_library_search_path(parent);
         }
 
+        // On Windows, pre-load with LOAD_WITH_ALTERED_SEARCH_PATH so the
+        // loader searches pdfium.dll's own directory for its dependencies
+        // (e.g. bundled vcruntime140.dll).  If successful the module is
+        // cached; pdfium-render's subsequent LoadLibraryExW returns the
+        // already-loaded handle without a new search.
+        #[cfg(windows)]
+        windows_preload_pdfium(&path);
+
         if let Ok(bindings) = Pdfium::bind_to_library(&path) {
             return Ok(Pdfium::new(bindings));
         }
@@ -443,10 +451,48 @@ pub(super) fn get_pdfium() -> Result<Pdfium, String> {
         .map(|b| Pdfium::new(b))
         .map_err(|e| {
             format!(
-                "PDFium native library not found or could not be loaded. The py-chunks wheel expects pypdfium2 to supply a native PDFium binary automatically. If this still fails, verify that the installed pypdfium2 package is intact and that your environment has access to the bundled pdfium library. On Windows, ensure pdfium.dll is present on PATH. Loader error: {}",
+                "PDFium native library not found or could not be loaded. \
+                 The py-chunks wheel bundles pdfium.dll — if you see this on \
+                 Windows, install the Visual C++ Redistributable 2022 (x64): \
+                 https://aka.ms/vs/17/release/vc_redist.x64.exe \
+                 Or set PDFIUM_LIBRARY_PATH to point at a working pdfium.dll. \
+                 Loader error: {}",
                 e
             )
         })
+}
+
+#[cfg(windows)]
+fn windows_preload_pdfium(path: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn LoadLibraryExW(
+            lp_file_name: *const u16,
+            h_file: *mut std::ffi::c_void,
+            dw_flags: u32,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    // LOAD_WITH_ALTERED_SEARCH_PATH: use the DLL's own directory as the
+    // base when resolving its import dependencies.
+    const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
+
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0u16))
+        .collect();
+
+    // Ignore the return value — on failure we fall through to pdfium-render's
+    // own load attempt which will surface the OS error code.
+    unsafe {
+        LoadLibraryExW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_WITH_ALTERED_SEARCH_PATH,
+        );
+    }
 }
 
 fn collect_paragraph_records(

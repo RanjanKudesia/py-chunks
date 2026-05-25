@@ -131,7 +131,7 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Download and bundle PDFium
+      - name: Download and bundle PDFium + MSVC runtime
         shell: pwsh
         run: |
           Invoke-WebRequest `
@@ -143,6 +143,17 @@ jobs:
           if (-not $dll) { Write-Error "pdfium.dll not found in archive"; exit 1 }
           Copy-Item -Path $dll.FullName -Destination "py_chunks\pdfium.dll"
           Write-Host "Bundled $($dll.Name) ($('{0:N0}' -f (Get-Item py_chunks\pdfium.dll).Length) bytes)"
+
+          # Bundle MSVC runtime DLLs alongside pdfium.dll so the Rust
+          # LOAD_WITH_ALTERED_SEARCH_PATH preload finds them in py_chunks/.
+          $runtimeDlls = @("vcruntime140.dll", "msvcp140.dll", "vcruntime140_1.dll")
+          foreach ($rt in $runtimeDlls) {
+            $src = "C:\Windows\System32\$rt"
+            if (Test-Path $src) {
+              Copy-Item -Path $src -Destination "py_chunks\$rt"
+              Write-Host "Bundled runtime $rt"
+            }
+          }
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
