@@ -1,3 +1,4 @@
+pub mod csv;
 pub mod docx;
 pub mod html;
 pub mod md;

@@ -2,19 +2,21 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, PDF, PPTX, TXT, Markdown, HTML, XLSX, and XLS files — optimised for production use.
+Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, PDF, PPTX, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
 
 ## Features
 
-- **8 Document Formats**: PDF, DOCX, PPTX, Markdown, HTML, TXT, XLSX, XLS
+- **9 Document Formats**: PDF, DOCX, PPTX, Markdown, HTML, TXT, CSV, XLSX, XLS
 - **7 Chunking Modes for document formats**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
 - **6 Chunking Modes for spreadsheet formats** (XLSX / XLS): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
+- **4 Chunking Modes for CSV**: `row`, `default`, `sliding_window`, `page_aware`
 - **Streaming for every format** via a single `stream_chunks()` entry point
   - PDF: background Rust thread + `mpsc` channel (all 7 modes, true one-chunk-at-a-time)
   - Markdown / HTML / TXT: block-by-block state machine for `structural` + `semantic`; batch-drain for the rest
   - DOCX: all 7 modes — `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes (lazy chunk emission after a single upfront parse)
   - PPTX: batch-drain (ZIP must be read upfront, then chunks are yielded one at a time)
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
+    - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
 - **Multiple Input Sources**: local file paths, raw `bytes` / `bytearray` / `memoryview`, file-like objects (`BytesIO`, open files), FastAPI / Starlette `UploadFile`, HTTP(S) / S3 pre-signed URLs
 - **Consistent Output Schema**: every chunk is a `dict` with `content`, `content_type`, and `metadata` keys
 - **Zero Python runtime dependencies**: all parsing happens in the Rust extension; the PDFium native binary is bundled inside the wheel
@@ -54,6 +56,8 @@ chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overla
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
 chunks = get_chunks("data.xlsx",    mode="row",            rows_per_chunk=5)
 chunks = get_chunks("legacy.xls",   mode="row",            rows_per_chunk=5)
+chunks = get_chunks("data.csv",     mode="row",            rows_per_chunk=10)
+chunks = get_chunks("data.csv",     mode="sliding_window", window_size=5, overlap=1)
 
 for chunk in chunks:
     print(chunk["content"])
@@ -279,6 +283,38 @@ for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4
 
 ---
 
+### CSV modes
+
+CSV files support a smaller mode set than the spreadsheet formats, but the API shape is the same for batch and streaming:
+
+```python
+from py_chunks import get_chunks, stream_chunks
+from py_chunks.chunkers.csv import chunk_csv, stream_chunk_csv
+
+chunks = get_chunks("data.csv", mode="default")
+chunks = get_chunks("data.csv", mode="sliding_window", window_size=4, overlap=1)
+chunks = get_chunks("data.csv", mode="page_aware", paragraphs_per_page=3)
+
+chunks, timing = chunk_csv("data.csv", mode="row", rows_per_chunk=10, delimiter=",")
+
+for chunk in stream_chunk_csv("data.csv", mode="row", rows_per_chunk=10):
+    print(chunk["content"])
+```
+
+| Mode | `content_type` | Description |
+|---|---|---|
+| `row` / `default` | `row_group` | Groups N consecutive data rows into one chunk. Header row is preserved in metadata and included in content when `include_headers=True`. |
+| `sliding_window` | `row_window` | Overlapping windows of N rows. Params: `window_size` and `overlap`. |
+| `page_aware` | `row_group` | CSV-friendly alias for row chunking. The unified API maps `paragraphs_per_page` to CSV row count for this mode. |
+
+CSV-specific options:
+
+- `delimiter`: one of `None`, `,`, `\t`, `;`, or `|`. When omitted, the first non-empty non-comment line is scanned to detect the delimiter.
+- `encoding`: one of `utf-8`, `utf-8-bom`, `latin-1`, or `windows-1252`.
+- `skip_empty_rows`: skips rows whose cells are all empty or whitespace-only.
+
+---
+
 ## Streaming
 
 ### When to use streaming
@@ -299,6 +335,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 | **DOCX** | All 7 | `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Full document parsed once upfront; chunks emitted lazily. Peak memory ≈ file size + chunk vec. Output equals `get_chunks` for every mode. |
 | **PPTX** | All 7 | Batch-drain | PPTX requires the full ZIP up front, so chunks are computed once at construction and yielded one per `__next__`. |
 | **XLSX / XLS** | All 6 | State machine for `row` / `sliding_window`; batch-drain for `table` / `sheet` / `page_aware` / `semantic` | calamine reads the full file on open (no incremental I/O at format level). `row` and `sliding_window` build one chunk per `__next__` from pre-parsed row data. The other four modes require global analysis first and materialise all chunks at iterator construction. Output is identical to `chunk_xlsx` for every mode. |
+| **CSV** | All 3 | Background thread + `mpsc` channel for `row` / `default` / `page_aware`; `VecDeque` rolling buffer for `sliding_window` | True line-by-line worker — never loads the full file. `sliding_window` streaming uses an O(window_size) rolling buffer. Output is identical to `chunk_csv` for every mode. |
 
 > **Parity guarantee**: streaming output equals `list(get_chunks(...))` for every format and every supported mode (this is exercised by `test_pdf_streaming.py` for PDF and by the tests in `py_chunks/tests/test_source_apis.py`).
 
@@ -306,6 +343,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 
 ```python
 from py_chunks import stream_chunks
+from py_chunks.chunkers.csv import stream_chunk_csv
 
 # PDF — all 7 modes
 for chunk in stream_chunks("large.pdf", mode="section"):
@@ -343,6 +381,16 @@ for chunk in stream_chunks("data.xlsx", mode="table", max_chunk_chars=3000):
 
 for chunk in stream_chunks("data.xlsx", mode="semantic", rows_per_chunk=20):
     handle(chunk)
+
+# CSV — all 3 modes
+for chunk in stream_chunks("data.csv", mode="row", rows_per_chunk=50):
+    embed_and_index(chunk)
+
+for chunk in stream_chunks("data.csv", mode="sliding_window", window_size=5, overlap=1):
+    process(chunk)
+
+for chunk in stream_chunk_csv("data.csv", mode="page_aware", rows_per_chunk=100, delimiter="\t"):
+    store_in_db(chunk)
 
 # From bytes (e.g. FastAPI body)
 for chunk in stream_chunks(request_body, filename="report.pdf", mode="semantic"):
@@ -397,10 +445,13 @@ Or use the explicit source-specific helpers:
 | HTML       | `.html`, `.htm`   | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | Plain Text | `.txt`            | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | Excel      | `.xlsx`, `.xls`   | All 6 | All 6 (`row` / `sliding_window` state machine; others batch-drain) |
+| CSV        | `.csv`            | All 3 | All 3 (background thread; `VecDeque` rolling buffer for `sliding_window`) |
 
 The 7 document modes are: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`.
 
 The 6 spreadsheet modes are: `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`.
+
+The 3 CSV modes are: `row` / `default`, `sliding_window`, `page_aware`.
 
 ---
 
@@ -480,6 +531,7 @@ from py_chunks.chunkers.html import chunk_html, stream_chunk_html
 from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md
 from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt
 from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx  # handles both .xlsx and .xls
+from py_chunks.chunkers.csv  import chunk_csv,  stream_chunk_csv
 
 # Batch with timing
 chunks, timing = chunk_pdf("file.pdf", mode="section")
@@ -516,6 +568,17 @@ chunks, timing = chunk_xlsx("legacy.xls", mode="row",           rows_per_chunk=5
 for chunk in stream_chunk_xlsx("data.xlsx",  mode="row",            rows_per_chunk=10):  ...
 for chunk in stream_chunk_xlsx("data.xlsx",  mode="sliding_window", window_size=4, overlap=1): ...
 for chunk in stream_chunk_xlsx("legacy.xls", mode="semantic",       rows_per_chunk=20): ...
+
+# CSV — batch with timing
+chunks, timing = chunk_csv("data.csv", mode="row",            rows_per_chunk=10)
+chunks, timing = chunk_csv("data.csv", mode="sliding_window", window_size=5, overlap=1)
+chunks, timing = chunk_csv("data.csv", mode="page_aware",     rows_per_chunk=100)
+chunks, timing = chunk_csv("data.csv", mode="row",            delimiter="\t", encoding="utf-8")
+
+# CSV — streaming
+for chunk in stream_chunk_csv("data.csv", mode="row",            rows_per_chunk=50):          ...
+for chunk in stream_chunk_csv("data.csv", mode="sliding_window", window_size=5, overlap=1):   ...
+for chunk in stream_chunk_csv("data.csv", mode="page_aware",     rows_per_chunk=100):         ...
 ```
 
 ---
@@ -552,9 +615,10 @@ for chunk in stream_chunk_xlsx("legacy.xls", mode="semantic",       rows_per_chu
 | `row_document` | XLSX/XLS: N consecutive data rows (`row` mode) |
 | `table_region` | XLSX/XLS: named table or heuristic data region (`table` mode) |
 | `sheet` | XLSX/XLS: full sheet or split part (`sheet` mode) |
-| `row_window` | XLSX/XLS: overlapping row window (`sliding_window` mode) |
+| `row_window` | XLSX/XLS and CSV: overlapping row window (`sliding_window` mode) |
 | `sheet_region` | XLSX/XLS: print area or full sheet (`page_aware` mode) |
 | `semantic_group` | XLSX/XLS: category-grouped rows or fallback fixed-size group (`semantic` mode) |
+| `row_group` | CSV: N consecutive data rows (`row`, `default`, `page_aware` modes) |
 
 ### Metadata fields by mode
 
@@ -582,6 +646,13 @@ Metadata is a `dict` whose keys depend on both the format and the mode. The most
 | `page_aware` | DOCX | `page_number`, `page_break_type`, `paragraph_count`, `section_heading_level`, `headings`, `list_item_count`, `table_count`, `document_metadata` |
 | `page_aware` | MD / HTML / TXT | `page_number`, `page_break_type` (heading-boundary or paragraph-count), `paragraph_count` |
 | `page_aware` | PPTX | `slide_numbers`, `paragraph_count` |
+
+**CSV metadata fields by mode:**
+
+| Mode | Notable metadata keys |
+|---|---|
+| `row` / `default` / `page_aware` | `row_start`, `row_end`, `row_count`, `col_count`, `header_row`, `delimiter_detected`, `encoding`, `chunk_index` |
+| `sliding_window` | `window_index`, `window_size`, `overlap`, `row_start`, `row_end`, `actual_row_count`, `col_count`, `header_row`, `delimiter_detected`, `encoding`, `chunk_index` |
 
 The DOCX `semantic` `merge_reason` is one of: `heading_merge`, `keyword_overlap`, `reference_continuity`, `short_paragraph`, `transition_break`.
 
@@ -735,7 +806,8 @@ def process_document(file_path: str):
 │        (py_chunks/chunkers/*.py)             │
 │   chunk_pdf / chunk_docx / chunk_pptx /      │
 │   chunk_md  / chunk_html / chunk_txt  /      │
-│   chunk_xlsx (handles .xlsx + .xls)    +     │
+│   chunk_xlsx (handles .xlsx + .xls)   /      │
+│   chunk_csv                           +      │
 │   matching stream_chunk_* variants           │
 └──────────────┬───────────────────────────────┘
                │  validates args, dispatches to the right Rust function,
@@ -766,6 +838,9 @@ def process_document(file_path: str):
 │    table / sheet / page_aware / semantic: batch-drain            │
 │    table mode: ZIP XML for named tables (XLSX) or heuristic      │
 │    page_aware: print-area XML (XLSX) or full-sheet fallback      │
+│  CSV           — csv crate (not calamine); encoding_rs decoding  │
+│    row / default / page_aware: background thread + mpsc channel  │
+│    sliding_window: VecDeque rolling buffer, O(window_size) memory│
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -794,7 +869,7 @@ except FileNotFoundError as e:
 try:
     chunks = get_chunks("image.png")
 except ValueError as e:
-    print(e)   # Unsupported file type '.png'. Supported: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
+    print(e)   # Unsupported file type '.png'. Supported: .csv, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
 
 # Scanned / image-only PDF (no text layer)
 try:

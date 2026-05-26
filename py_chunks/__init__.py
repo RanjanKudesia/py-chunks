@@ -40,6 +40,7 @@ if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
     os.add_dll_directory(str(_pkg_dir))
 
 from .chunkers.docx import chunk_docx, stream_chunk_docx
+from .chunkers.csv import chunk_csv, stream_chunk_csv
 from .chunkers.html import chunk_html, stream_chunk_html
 from .chunkers.md import chunk_md, stream_chunk_md
 from .chunkers.pdf import chunk_pdf, stream_chunk_pdf
@@ -50,6 +51,7 @@ from .chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx
 
 _DISPATCH = {
     ".docx": chunk_docx,
+    ".csv": chunk_csv,
     ".html": chunk_html,
     ".htm": chunk_html,
     ".md": chunk_md,
@@ -61,6 +63,7 @@ _DISPATCH = {
 }
 
 _EXT_DOCX = ".docx"
+_EXT_CSV = ".csv"
 _EXT_PDF = ".pdf"
 _EXT_MD = ".md"
 _EXT_TXT = ".txt"
@@ -151,6 +154,10 @@ def _xlsx_rows_per_chunk(sentences_per_chunk: int) -> int:
     return 1 if sentences_per_chunk == 3 else sentences_per_chunk
 
 
+def _csv_rows_per_chunk(sentences_per_chunk: int) -> int:
+    return max(1, sentences_per_chunk)
+
+
 def get_chunks_from_path(
     file_path: str,
     *,
@@ -159,10 +166,12 @@ def get_chunks_from_path(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Chunk any supported document from a local path.
 
-    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
+    Supported extensions: .csv, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         file_path: Path to the document file.
@@ -177,7 +186,7 @@ def get_chunks_from_path(
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    chunker, _ = _resolve_chunker(file_path)
+    chunker, ext = _resolve_chunker(file_path)
 
     if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
         chunks, _ = chunk_xlsx(
@@ -186,6 +195,24 @@ def get_chunks_from_path(
             rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
             window_size=window_size,
             overlap=overlap,
+        )
+        return chunks
+
+    if ext == _EXT_CSV:
+        csv_mode = "row" if mode == "default" else mode
+        rows_per_chunk = (
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+        )
+        chunks, _ = chunk_csv(
+            file_path,
+            mode=csv_mode,
+            rows_per_chunk=rows_per_chunk,
+            window_size=window_size,
+            overlap=overlap,
+            include_headers=True,
+            delimiter=delimiter,
+            encoding=encoding,
+            skip_empty_rows=True,
         )
         return chunks
 
@@ -210,6 +237,8 @@ def get_chunks_from_bytes(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Chunk a document from raw bytes (e.g. an API file upload).
 
@@ -250,6 +279,24 @@ def get_chunks_from_bytes(
             )
             return chunks
 
+        if ext == _EXT_CSV:
+            csv_mode = "row" if mode == "default" else mode
+            rows_per_chunk = (
+                paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+            )
+            chunks, _ = chunk_csv(
+                tmp_path,
+                mode=csv_mode,
+                rows_per_chunk=rows_per_chunk,
+                window_size=window_size,
+                overlap=overlap,
+                include_headers=True,
+                delimiter=delimiter,
+                encoding=encoding,
+                skip_empty_rows=True,
+            )
+            return chunks
+
         chunks, _ = _run_chunker(
             chunker,
             tmp_path,
@@ -274,6 +321,8 @@ def get_chunks_from_fileobj(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Chunk from a file-like object (open file, BytesIO, spooled temp file)."""
     inferred_name = filename or getattr(file_obj, "name", None)
@@ -296,6 +345,8 @@ def get_chunks_from_fileobj(
         overlap=overlap,
         sentences_per_chunk=sentences_per_chunk,
         paragraphs_per_page=paragraphs_per_page,
+        delimiter=delimiter,
+        encoding=encoding,
     )
 
 
@@ -307,6 +358,8 @@ def get_chunks_from_upload(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Chunk from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
@@ -323,6 +376,8 @@ def get_chunks_from_upload(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(upload_file, "read"):
@@ -345,6 +400,8 @@ def get_chunks_from_upload(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     raise TypeError("upload_file must provide .file.read() or .read()")
@@ -360,6 +417,8 @@ def get_chunks_from_s3_presigned_url(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Download from a pre-signed URL and chunk the file."""
     inferred_name = filename
@@ -381,6 +440,8 @@ def get_chunks_from_s3_presigned_url(
         overlap=overlap,
         sentences_per_chunk=sentences_per_chunk,
         paragraphs_per_page=paragraphs_per_page,
+        delimiter=delimiter,
+        encoding=encoding,
     )
 
 
@@ -392,6 +453,8 @@ def stream_chunks_from_path(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Stream chunks from any supported document at a local path.
 
@@ -466,6 +529,22 @@ def stream_chunks_from_path(
             window_size=window_size,
             overlap=overlap,
         )
+    if ext == _EXT_CSV:
+        csv_mode = "row" if mode == "default" else mode
+        rows_per_chunk = (
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+        )
+        return stream_chunk_csv(
+            file_path,
+            mode=csv_mode,
+            rows_per_chunk=rows_per_chunk,
+            window_size=window_size,
+            overlap=overlap,
+            include_headers=True,
+            delimiter=delimiter,
+            encoding=encoding,
+            skip_empty_rows=True,
+        )
     if ext in (_EXT_HTML, _EXT_HTM):
         return stream_chunk_html(
             file_path,
@@ -488,6 +567,8 @@ def stream_chunks_from_bytes(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Stream chunks from raw bytes (e.g. an API file upload).
 
@@ -577,6 +658,23 @@ def stream_chunks_from_bytes(
             overlap=overlap,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_CSV:
+        csv_mode = "row" if mode == "default" else mode
+        rows_per_chunk = (
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+        )
+        iterator = stream_chunk_csv(
+            tmp_path,
+            mode=csv_mode,
+            rows_per_chunk=rows_per_chunk,
+            window_size=window_size,
+            overlap=overlap,
+            include_headers=True,
+            delimiter=delimiter,
+            encoding=encoding,
+            skip_empty_rows=True,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
     if ext in (_EXT_HTML, _EXT_HTM):
         iterator = stream_chunk_html(
             tmp_path,
@@ -600,6 +698,8 @@ def stream_chunks_from_fileobj(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Stream chunks from a file-like object (open file, BytesIO, etc.)."""
     inferred_name = filename or getattr(file_obj, "name", None)
@@ -622,6 +722,8 @@ def stream_chunks_from_fileobj(
         overlap=overlap,
         sentences_per_chunk=sentences_per_chunk,
         paragraphs_per_page=paragraphs_per_page,
+        delimiter=delimiter,
+        encoding=encoding,
     )
 
 
@@ -633,6 +735,8 @@ def stream_chunks_from_upload(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Stream chunks from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
@@ -649,6 +753,8 @@ def stream_chunks_from_upload(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(upload_file, "read"):
@@ -671,6 +777,8 @@ def stream_chunks_from_upload(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     raise TypeError("upload_file must provide .file.read() or .read()")
@@ -686,6 +794,8 @@ def stream_chunks_from_s3_presigned_url(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Stream chunks from a document downloaded via pre-signed URL."""
     inferred_name = filename
@@ -707,6 +817,8 @@ def stream_chunks_from_s3_presigned_url(
         overlap=overlap,
         sentences_per_chunk=sentences_per_chunk,
         paragraphs_per_page=paragraphs_per_page,
+        delimiter=delimiter,
+        encoding=encoding,
     )
 
 
@@ -719,6 +831,8 @@ def stream_chunks(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> Any:
     """Unified streaming chunking entrypoint across paths, bytes, file objects, uploads, and URLs.
 
@@ -754,6 +868,8 @@ def stream_chunks(
                 overlap=overlap,
                 sentences_per_chunk=sentences_per_chunk,
                 paragraphs_per_page=paragraphs_per_page,
+                delimiter=delimiter,
+                encoding=encoding,
             )
         return stream_chunks_from_path(
             source_path,
@@ -762,6 +878,8 @@ def stream_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if isinstance(source, memoryview):
@@ -781,6 +899,8 @@ def stream_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(source, "filename"):
@@ -791,6 +911,8 @@ def stream_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(source, "read"):
@@ -802,6 +924,8 @@ def stream_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     raise TypeError(
@@ -818,6 +942,8 @@ def get_chunks(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
 ) -> list[dict]:
     """Unified chunking entrypoint across paths, bytes, file objects, uploads, and URLs."""
     if isinstance(source, (str, PathLike)):
@@ -832,6 +958,8 @@ def get_chunks(
                 overlap=overlap,
                 sentences_per_chunk=sentences_per_chunk,
                 paragraphs_per_page=paragraphs_per_page,
+                delimiter=delimiter,
+                encoding=encoding,
             )
         return get_chunks_from_path(
             source_path,
@@ -840,6 +968,8 @@ def get_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if isinstance(source, memoryview):
@@ -859,6 +989,8 @@ def get_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(source, "filename"):
@@ -869,6 +1001,8 @@ def get_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     if hasattr(source, "read"):
@@ -880,6 +1014,8 @@ def get_chunks(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+            delimiter=delimiter,
+            encoding=encoding,
         )
 
     raise TypeError(
@@ -901,6 +1037,8 @@ __all__ = [
     "stream_chunks",
     "chunk_docx",
     "stream_chunk_docx",
+    "chunk_csv",
+    "stream_chunk_csv",
     "chunk_html",
     "stream_chunk_html",
     "chunk_md",
