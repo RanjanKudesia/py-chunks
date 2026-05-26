@@ -5,3 +5,4 @@ pub mod pdf;
 pub mod pptx;
 pub mod shared;
 pub mod txt;
+pub mod xlsx;

@@ -4,18 +4,21 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.2.4"
+version = "0.3.0"
 description = "Rust-backed Python chunking library"
 requires-python = ">=3.9"
 dependencies = ["pypdfium2"]
 license = { text = "MIT" }
 readme = "README.md"
-keywords = ["chunking", "document", "pdf", "docx", "rust"]
+keywords = ["chunking", "document", "pdf", "docx", "xlsx", "rust"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+
+[project.optional-dependencies]
+dev = ["openpyxl>=3.1"]
 
 [tool.maturin]
 python-source = "."

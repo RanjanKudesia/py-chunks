@@ -17,3 +17,4 @@ quick-xml = "0.38"
 serde_json = "1"
 zip = "2"
 pdfium-render = { version = "0.8", features = ["sync"] }
+calamine = { version = "0.26", features = ["dates"] }

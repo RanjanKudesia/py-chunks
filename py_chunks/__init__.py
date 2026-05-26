@@ -45,6 +45,7 @@ from .chunkers.md import chunk_md, stream_chunk_md
 from .chunkers.pdf import chunk_pdf, stream_chunk_pdf
 from .chunkers.pptx import chunk_pptx, stream_chunk_pptx
 from .chunkers.txt import chunk_txt, stream_chunk_txt
+from .chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx
 
 
 _DISPATCH = {
@@ -55,6 +56,8 @@ _DISPATCH = {
     ".pdf": chunk_pdf,
     ".pptx": chunk_pptx,
     ".txt": chunk_txt,
+    ".xlsx": chunk_xlsx,
+    ".xls": chunk_xlsx,
 }
 
 _EXT_DOCX = ".docx"
@@ -64,6 +67,8 @@ _EXT_TXT = ".txt"
 _EXT_PPTX = ".pptx"
 _EXT_HTML = ".html"
 _EXT_HTM = ".htm"
+_EXT_XLSX = ".xlsx"
+_EXT_XLS = ".xls"
 
 _SUPPORTED = ", ".join(sorted(_DISPATCH))
 
@@ -142,6 +147,10 @@ def _run_chunker(
     )
 
 
+def _xlsx_rows_per_chunk(sentences_per_chunk: int) -> int:
+    return 1 if sentences_per_chunk == 3 else sentences_per_chunk
+
+
 def get_chunks_from_path(
     file_path: str,
     *,
@@ -153,7 +162,7 @@ def get_chunks_from_path(
 ) -> list[dict]:
     """Chunk any supported document from a local path.
 
-    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         file_path: Path to the document file.
@@ -169,6 +178,16 @@ def get_chunks_from_path(
         raise FileNotFoundError(f"File not found: {file_path}")
 
     chunker, _ = _resolve_chunker(file_path)
+
+    if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
+        chunks, _ = chunk_xlsx(
+            file_path,
+            mode="row" if mode == "default" else mode,
+            rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+            window_size=window_size,
+            overlap=overlap,
+        )
+        return chunks
 
     chunks, _ = _run_chunker(
         chunker,
@@ -198,7 +217,7 @@ def get_chunks_from_bytes(
     the temp file.  The original filename is only used for extension
     detection — it is never written to disk under that name.
 
-    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         data:     Raw bytes of the document.
@@ -221,6 +240,16 @@ def get_chunks_from_bytes(
         tmp_path = tmp.name
 
     try:
+        if ext in (_EXT_XLSX, _EXT_XLS):
+            chunks, _ = chunk_xlsx(
+                tmp_path,
+                mode="row" if mode == "default" else mode,
+                rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+                window_size=window_size,
+                overlap=overlap,
+            )
+            return chunks
+
         chunks, _ = _run_chunker(
             chunker,
             tmp_path,
@@ -366,7 +395,7 @@ def stream_chunks_from_path(
 ) -> Any:
     """Stream chunks from any supported document at a local path.
 
-    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         file_path: Path to the document file.
@@ -429,6 +458,14 @@ def stream_chunks_from_path(
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
         )
+    if ext in (_EXT_XLSX, _EXT_XLS):
+        return stream_chunk_xlsx(
+            file_path,
+            mode="row" if mode == "default" else mode,
+            rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+            window_size=window_size,
+            overlap=overlap,
+        )
     if ext in (_EXT_HTML, _EXT_HTM):
         return stream_chunk_html(
             file_path,
@@ -458,7 +495,7 @@ def stream_chunks_from_bytes(
     then deletes the temp file. The original filename is only used for
     extension detection — it is never written to disk under that name.
 
-    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    Supported extensions: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         data:     Raw bytes of the document.
@@ -529,6 +566,15 @@ def stream_chunks_from_bytes(
             overlap=overlap,
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext in (_EXT_XLSX, _EXT_XLS):
+        iterator = stream_chunk_xlsx(
+            tmp_path,
+            mode="row" if mode == "default" else mode,
+            rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+            window_size=window_size,
+            overlap=overlap,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
     if ext in (_EXT_HTML, _EXT_HTM):
@@ -679,7 +725,7 @@ def stream_chunks(
     Returns an iterator that yields chunks one at a time without buffering
     the entire result list in memory. Useful for large documents.
 
-    Supports streaming for all formats: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    Supports streaming for all formats: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
 
     Args:
         source: File path, URL, bytes, file-like object, or upload object.
@@ -865,4 +911,6 @@ __all__ = [
     "stream_chunk_pptx",
     "chunk_txt",
     "stream_chunk_txt",
+    "chunk_xlsx",
+    "stream_chunk_xlsx",
 ]

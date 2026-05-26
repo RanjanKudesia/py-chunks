@@ -2,17 +2,19 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, PDF, PPTX, TXT, Markdown, and HTML files — optimised for production use.
+Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, PDF, PPTX, TXT, Markdown, HTML, XLSX, and XLS files — optimised for production use.
 
 ## Features
 
-- **6 Document Formats**: PDF, DOCX, PPTX, Markdown, HTML, TXT
-- **7 Chunking Modes across every format**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
+- **8 Document Formats**: PDF, DOCX, PPTX, Markdown, HTML, TXT, XLSX, XLS
+- **7 Chunking Modes for document formats**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
+- **6 Chunking Modes for spreadsheet formats** (XLSX / XLS): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
 - **Streaming for every format** via a single `stream_chunks()` entry point
   - PDF: background Rust thread + `mpsc` channel (all 7 modes, true one-chunk-at-a-time)
   - Markdown / HTML / TXT: block-by-block state machine for `structural` + `semantic`; batch-drain for the rest
   - DOCX: all 7 modes — `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes (lazy chunk emission after a single upfront parse)
   - PPTX: batch-drain (ZIP must be read upfront, then chunks are yielded one at a time)
+  - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
 - **Multiple Input Sources**: local file paths, raw `bytes` / `bytearray` / `memoryview`, file-like objects (`BytesIO`, open files), FastAPI / Starlette `UploadFile`, HTTP(S) / S3 pre-signed URLs
 - **Consistent Output Schema**: every chunk is a `dict` with `content`, `content_type`, and `metadata` keys
 - **Zero Python runtime dependencies**: all parsing happens in the Rust extension; the PDFium native binary is bundled inside the wheel
@@ -50,6 +52,8 @@ chunks = get_chunks("notes.md",     mode="semantic")
 chunks = get_chunks("page.html",    mode="section")
 chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overlap=1)
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
+chunks = get_chunks("data.xlsx",    mode="row",            rows_per_chunk=5)
+chunks = get_chunks("legacy.xls",   mode="row",            rows_per_chunk=5)
 
 for chunk in chunks:
     print(chunk["content"])
@@ -195,6 +199,86 @@ These three formats also support **streaming in every mode** — see the Streami
 
 ---
 
+### XLSX / XLS modes
+
+Both `.xlsx` and `.xls` files are handled by the same chunker. All 6 modes are available for batch and streaming:
+
+```python
+from py_chunks import get_chunks, stream_chunks
+from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx
+
+# Batch — via unified API
+chunks = get_chunks("data.xlsx", mode="row", rows_per_chunk=5)
+chunks = get_chunks("legacy.xls", mode="row", rows_per_chunk=5)
+
+# Batch — via format-specific chunker (returns chunks + timing)
+chunks, timing = chunk_xlsx("data.xlsx", mode="row",            rows_per_chunk=5)
+chunks, timing = chunk_xlsx("data.xlsx", mode="table",          max_chunk_chars=3000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="sheet",          max_chunk_chars=5000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4, overlap=1)
+chunks, timing = chunk_xlsx("data.xlsx", mode="page_aware",     max_chunk_chars=3000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="semantic",       rows_per_chunk=10)
+
+# Filter to specific sheets
+chunks, _ = chunk_xlsx("data.xlsx", mode="row", sheet_names=["Sales", "Q4"])
+
+# Streaming — identical output to batch
+for chunk in stream_chunks("data.xlsx", mode="row", rows_per_chunk=5):
+    print(chunk["content"])
+
+for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4, overlap=1):
+    embed_and_store(chunk)
+```
+
+| Mode | `content_type` | Description |
+|---|---|---|
+| `row` | `row_document` | Groups N consecutive data rows into one chunk. Header row is auto-detected and excluded from content. Param: `rows_per_chunk` (default 1). |
+| `table` | `table_region` | Named Excel tables (XLSX only) or heuristic contiguous data regions per sheet. For XLS and sheets without named tables, falls back to bounding-box detection. Param: `max_chunk_chars`. |
+| `sheet` | `sheet` | One chunk per sheet (split by `max_chunk_chars` if needed). Includes named-table metadata. Param: `max_chunk_chars`. |
+| `sliding_window` | `row_window` | Overlapping windows of N rows. Params: `window_size` (default 3), `overlap` (default 1, must be `< window_size`). |
+| `page_aware` | `sheet_region` | Chunks by Excel print areas (XLSX only); falls back to the full sheet when no print area is defined. For XLS, always uses the full-sheet fallback. Param: `max_chunk_chars`. |
+| `semantic` | `semantic_group` | Detects the column with the lowest cardinality of string values, sorts by it, and groups rows sharing the same category value. Falls back to fixed-size chunking when no suitable column is found. Param: `rows_per_chunk` (used for the fallback). |
+
+**Parameters accepted by `chunk_xlsx` and `stream_chunk_xlsx`:**
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `file_path` | str | — | Path to `.xlsx` or `.xls` file |
+| `mode` | str | `"row"` | One of the 6 modes above |
+| `rows_per_chunk` | int | 1 | Rows per chunk (`row` mode and `semantic` fallback). Must be `> 0`. |
+| `window_size` | int | 3 | Window size in rows (`sliding_window` mode). Must be `>= 1`. |
+| `overlap` | int | 1 | Overlapping rows between windows. Must be `< window_size`. |
+| `include_headers` | bool | True | Prefix each row value with its column header (`key: value` format). |
+| `sheet_names` | list[str] \| None | None | Process only the named sheets; processes all sheets when `None` or `[]`. |
+| `skip_empty_rows` | bool | True | Skip rows where every cell is empty. |
+| `max_chunk_chars` | int | 2000 | Character limit per chunk (`table`, `sheet`, `page_aware` modes). |
+
+**XLS vs XLSX differences:**
+
+| Feature | XLSX | XLS |
+|---|---|---|
+| Named table detection (`table` mode) | ZIP XML (`table1.xml`) — full named-table metadata | Not available — heuristic bounding-box only; `is_named_table` is always `false` |
+| Print area detection (`page_aware` mode) | Parsed from `xl/workbook.xml` | Not available — always uses full-sheet fallback; `has_print_area` is always `false` |
+| Named table metadata in `sheet` mode | `has_named_tables: true/false`, `named_tables: [...]` | Always `has_named_tables: false`, `named_tables: []` |
+| All other modes | Identical | Identical |
+
+**XLSX / XLS metadata fields by mode:**
+
+| Mode | Notable metadata keys |
+|---|---|
+| `row` | `sheet_name`, `sheet_index`, `row_index`, `header_row`, `col_count`, `rows_per_chunk`, `actual_row_count`, `chunk_index` |
+| `table` | `sheet_name`, `sheet_index`, `table_name`, `is_named_table`, `header_row`, `start_row`, `end_row`, `start_col`, `end_col`, `row_count`, `col_count`, `chunk_index`, `is_split`, `split_part` |
+| `sheet` | `sheet_name`, `sheet_index`, `row_count`, `col_count`, `header_row`, `has_named_tables`, `named_tables`, `chunk_index`, `is_split`, `split_part` |
+| `sliding_window` | `sheet_name`, `sheet_index`, `window_size`, `overlap`, `actual_row_count`, `window_index`, `start_row`, `end_row`, `header_row`, `col_count`, `chunk_index` |
+| `page_aware` | `sheet_name`, `sheet_index`, `has_print_area`, `print_area_ref`, `start_row`, `end_row`, `start_col`, `end_col`, `row_count`, `col_count`, `header_row`, `region_index`, `chunk_index`, `is_split`, `split_part` |
+| `semantic` | `sheet_name`, `sheet_index`, `category_column`, `category_value`, `used_fallback`, `low_grouping_quality`, `avg_group_size`, `start_row`, `end_row`, `actual_row_count`, `header_row`, `col_count`, `group_index`, `chunk_index` |
+
+> **Streaming memory profile**: `row` and `sliding_window` pre-parse all sheet data once (calamine reads the entire file on open — there is no incremental I/O at the format level), then build and yield one chunk per `__next__`. The other four modes require global sheet analysis before the first chunk can be emitted, so they materialise all chunks at construction time and drain them lazily. In both cases the streaming iterator yields one chunk at a time.
+
+> **Header detection**: the first all-string row in each sheet is automatically detected as the header row and excluded from chunk content. Columns without a header label are named `Column 1`, `Column 2`, etc.
+
+---
+
 ## Streaming
 
 ### When to use streaming
@@ -214,6 +298,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 | **TXT** | All 7 | Same as Markdown | Pure Rust, no threads. |
 | **DOCX** | All 7 | `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Full document parsed once upfront; chunks emitted lazily. Peak memory ≈ file size + chunk vec. Output equals `get_chunks` for every mode. |
 | **PPTX** | All 7 | Batch-drain | PPTX requires the full ZIP up front, so chunks are computed once at construction and yielded one per `__next__`. |
+| **XLSX / XLS** | All 6 | State machine for `row` / `sliding_window`; batch-drain for `table` / `sheet` / `page_aware` / `semantic` | calamine reads the full file on open (no incremental I/O at format level). `row` and `sliding_window` build one chunk per `__next__` from pre-parsed row data. The other four modes require global analysis first and materialise all chunks at iterator construction. Output is identical to `chunk_xlsx` for every mode. |
 
 > **Parity guarantee**: streaming output equals `list(get_chunks(...))` for every format and every supported mode (this is exercised by `test_pdf_streaming.py` for PDF and by the tests in `py_chunks/tests/test_source_apis.py`).
 
@@ -245,6 +330,19 @@ for chunk in stream_chunks("document.docx", mode="page_aware",   paragraphs_per_
 # PPTX — any mode
 for chunk in stream_chunks("deck.pptx", mode="semantic"):
     ...
+
+# XLSX / XLS — all 6 modes
+for chunk in stream_chunks("data.xlsx", mode="row", rows_per_chunk=10):
+    embed_and_index(chunk)
+
+for chunk in stream_chunks("report.xls", mode="sliding_window", window_size=5, overlap=2):
+    process(chunk)
+
+for chunk in stream_chunks("data.xlsx", mode="table", max_chunk_chars=3000):
+    store_in_db(chunk)
+
+for chunk in stream_chunks("data.xlsx", mode="semantic", rows_per_chunk=20):
+    handle(chunk)
 
 # From bytes (e.g. FastAPI body)
 for chunk in stream_chunks(request_body, filename="report.pdf", mode="semantic"):
@@ -298,8 +396,11 @@ Or use the explicit source-specific helpers:
 | Markdown   | `.md`             | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | HTML       | `.html`, `.htm`   | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | Plain Text | `.txt`            | All 7 | All 7 (state machine for `structural` / `semantic`) |
+| Excel      | `.xlsx`, `.xls`   | All 6 | All 6 (`row` / `sliding_window` state machine; others batch-drain) |
 
-The 7 modes are: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`.
+The 7 document modes are: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`.
+
+The 6 spreadsheet modes are: `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`.
 
 ---
 
@@ -378,6 +479,7 @@ from py_chunks.chunkers.pptx import chunk_pptx, stream_chunk_pptx, chunk_pptx_wi
 from py_chunks.chunkers.html import chunk_html, stream_chunk_html
 from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md
 from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt
+from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx  # handles both .xlsx and .xls
 
 # Batch with timing
 chunks, timing = chunk_pdf("file.pdf", mode="section")
@@ -401,6 +503,19 @@ for chunk in stream_chunk_md("book.md", mode="sentence", sentences_per_chunk=2):
 for chunk in stream_chunk_html("page.html", mode="section"):           ...
 for chunk in stream_chunk_txt("log.txt", mode="page_aware", paragraphs_per_page=20): ...
 for chunk in stream_chunk_pptx("deck.pptx", mode="semantic"):          ...
+
+# XLSX / XLS — all 6 modes, batch and streaming
+chunks, timing = chunk_xlsx("data.xlsx", mode="row",            rows_per_chunk=5)
+chunks, timing = chunk_xlsx("data.xlsx", mode="table",          max_chunk_chars=3000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="sheet",          max_chunk_chars=5000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4, overlap=1)
+chunks, timing = chunk_xlsx("data.xlsx", mode="page_aware",     max_chunk_chars=3000)
+chunks, timing = chunk_xlsx("data.xlsx", mode="semantic",       rows_per_chunk=10)
+chunks, timing = chunk_xlsx("legacy.xls", mode="row",           rows_per_chunk=5)  # XLS works identically
+
+for chunk in stream_chunk_xlsx("data.xlsx",  mode="row",            rows_per_chunk=10):  ...
+for chunk in stream_chunk_xlsx("data.xlsx",  mode="sliding_window", window_size=4, overlap=1): ...
+for chunk in stream_chunk_xlsx("legacy.xls", mode="semantic",       rows_per_chunk=20): ...
 ```
 
 ---
@@ -433,7 +548,13 @@ for chunk in stream_chunk_pptx("deck.pptx", mode="semantic"):          ...
 | `semantic` | Heuristic topic-continuity group (`semantic` mode) |
 | `sliding_window` | Fixed-size overlapping window (`sliding_window` mode) |
 | `sentence` | Sentence-count group (`sentence` mode) |
-| `page_aware` | Page boundary group (`page_aware` mode) |
+| `page_aware` | Page boundary group (`page_aware` mode for document formats) |
+| `row_document` | XLSX/XLS: N consecutive data rows (`row` mode) |
+| `table_region` | XLSX/XLS: named table or heuristic data region (`table` mode) |
+| `sheet` | XLSX/XLS: full sheet or split part (`sheet` mode) |
+| `row_window` | XLSX/XLS: overlapping row window (`sliding_window` mode) |
+| `sheet_region` | XLSX/XLS: print area or full sheet (`page_aware` mode) |
+| `semantic_group` | XLSX/XLS: category-grouped rows or fallback fixed-size group (`semantic` mode) |
 
 ### Metadata fields by mode
 
@@ -613,7 +734,8 @@ def process_document(file_path: str):
 │            Format Dispatcher                 │
 │        (py_chunks/chunkers/*.py)             │
 │   chunk_pdf / chunk_docx / chunk_pptx /      │
-│   chunk_md  / chunk_html / chunk_txt   +     │
+│   chunk_md  / chunk_html / chunk_txt  /      │
+│   chunk_xlsx (handles .xlsx + .xls)    +     │
 │   matching stream_chunk_* variants           │
 └──────────────┬───────────────────────────────┘
                │  validates args, dispatches to the right Rust function,
@@ -639,6 +761,11 @@ def process_document(file_path: str):
 │  DOCX stream   — DocxStructuralIterator (default/structural) +   │
 │                  per-mode iterators for all other 5 modes        │
 │  PPTX stream   — batch-drain (ZIP must be read upfront)          │
+│  XLSX/XLS      — open_workbook_auto() handles both formats;      │
+│    row / sliding_window: state machine, one chunk per __next__   │
+│    table / sheet / page_aware / semantic: batch-drain            │
+│    table mode: ZIP XML for named tables (XLSX) or heuristic      │
+│    page_aware: print-area XML (XLSX) or full-sheet fallback      │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -667,7 +794,7 @@ except FileNotFoundError as e:
 try:
     chunks = get_chunks("image.png")
 except ValueError as e:
-    print(e)   # Unsupported file type '.png'. Supported: .docx, .htm, .html, .md, .pdf, .pptx, .txt
+    print(e)   # Unsupported file type '.png'. Supported: .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
 
 # Scanned / image-only PDF (no text layer)
 try:

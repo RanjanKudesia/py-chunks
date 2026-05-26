@@ -6,6 +6,7 @@ from .md import chunk_md, stream_chunk_md
 from .pdf import chunk_pdf, stream_chunk_pdf
 from .pptx import chunk_pptx, stream_chunk_pptx
 from .txt import chunk_txt, stream_chunk_txt
+from .xlsx import chunk_xlsx, stream_chunk_xlsx
 
 __all__ = [
     "chunk_docx",
@@ -20,4 +21,6 @@ __all__ = [
     "stream_chunk_pptx",
     "chunk_txt",
     "stream_chunk_txt",
+    "chunk_xlsx",
+    "stream_chunk_xlsx",
 ]

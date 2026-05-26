@@ -185,7 +185,7 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
             if let Some(ref title) = slide.title {
                 current_section = Some(title.clone());
                 result.push(ChunkRecordInput {
-                    content_type: ContentType::HeadingSection,
+                    content_type: ContentType::Semantic,
                     content: title.clone(),
                     metadata: json!({
                         "slide_range":          [slide_num, slide_num],
