@@ -180,3 +180,13 @@ def stream_chunk_docx(
         return _rust.chunk_docx_page_aware_stream(str(path), paragraphs_per_page)
 
     return _rust.chunk_docx_structural_stream(str(path))
+
+
+def docx_to_markdown(file_path: str) -> str:
+    """Convert a DOCX file to a Markdown string."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+    if path.suffix.lower() != ".docx":
+        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    return _rust.docx_to_markdown(str(path))

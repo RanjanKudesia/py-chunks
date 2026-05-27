@@ -103,3 +103,32 @@ def stream_chunk_csv(
         encoding,
         skip_empty_rows,
     )
+
+
+def csv_to_markdown(
+    file_path: str,
+    delimiter: str | None = None,
+    encoding: str = "utf-8",
+) -> str:
+    """Convert a CSV file to a Markdown pipe table.
+
+    Args:
+        file_path: Path to the .csv file.
+        delimiter: Column separator. ``None`` (default) = auto-detect from the
+                   first data line. Accepts ``','``, ``'\\t'``, ``';'``, ``'|'``.
+        encoding:  File encoding. One of ``"utf-8"`` (default), ``"utf-8-bom"``,
+                   ``"latin-1"``, ``"windows-1252"``.
+
+    Returns:
+        Markdown pipe table string with the first CSV row as the header row.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"CSV file not found: {file_path}")
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"Expected a .csv file, got: {file_path}")
+    return _rust.csv_to_markdown(
+        str(path),
+        delimiter=_parse_delimiter(delimiter),
+        encoding=encoding,
+    )

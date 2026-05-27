@@ -124,3 +124,16 @@ def stream_chunk_md(
         sentences_per_chunk,
         paragraphs_per_page,
     )
+
+
+def md_to_markdown(file_path: str) -> str:
+    """Return the contents of a Markdown file as a Markdown string.
+
+    Markdown files are already in the target format, so the file is returned as-is.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Markdown file not found: {file_path}")
+    if path.suffix.lower() != ".md":
+        raise ValueError(f"Expected a .md file, got: {file_path}")
+    return path.read_text(encoding="utf-8", errors="replace")

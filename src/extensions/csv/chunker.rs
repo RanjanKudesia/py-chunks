@@ -9,8 +9,8 @@ use pythonize::pythonize;
 use serde_json::json;
 
 use super::common::{
-    detect_delimiter, read_first_data_line, read_to_utf8, serialize_row_kv,
-    serialize_row_values, CsvChunkRecord, CT_ROW_GROUP,
+    detect_delimiter, read_first_data_line, read_to_utf8, serialize_row_kv, serialize_row_values,
+    CsvChunkRecord, CT_ROW_GROUP,
 };
 use super::sliding_window::build_sliding_window_chunks;
 
@@ -22,7 +22,11 @@ fn chunk_to_pydict(py: Python<'_>, chunk: &CsvChunkRecord) -> PyResult<PyObject>
     Ok(dict.into_any().unbind())
 }
 
-fn delimiter_byte(delimiter: Option<u8>, file_path: &str, encoding: &str) -> Result<u8, String> {
+pub(crate) fn delimiter_byte(
+    delimiter: Option<u8>,
+    file_path: &str,
+    encoding: &str,
+) -> Result<u8, String> {
     match delimiter {
         Some(byte) => Ok(byte),
         None => {
@@ -33,18 +37,18 @@ fn delimiter_byte(delimiter: Option<u8>, file_path: &str, encoding: &str) -> Res
     }
 }
 
-fn normalize_headers(mut headers: Vec<String>, width: usize) -> Vec<String> {
+pub(crate) fn normalize_headers(mut headers: Vec<String>, width: usize) -> Vec<String> {
     if headers.len() < width {
         headers.extend((headers.len()..width).map(|idx| format!("Column {}", idx + 1)));
     }
     headers
 }
 
-fn is_empty_row(row: &[String]) -> bool {
+pub(crate) fn is_empty_row(row: &[String]) -> bool {
     row.iter().all(|value| value.trim().is_empty())
 }
 
-fn parse_csv_to_rows(
+pub(crate) fn parse_csv_to_rows(
     file_path: &str,
     delimiter: Option<u8>,
     encoding: &str,
@@ -67,7 +71,10 @@ fn parse_csv_to_rows(
         None => return Ok((Vec::new(), Vec::new(), delimiter)),
     };
 
-    let mut headers: Vec<String> = header_record.iter().map(|value| value.to_string()).collect();
+    let mut headers: Vec<String> = header_record
+        .iter()
+        .map(|value| value.to_string())
+        .collect();
     let mut data_rows: Vec<Vec<String>> = Vec::new();
     let mut max_width = headers.len();
 
@@ -207,13 +214,17 @@ pub fn chunk_csv(
     }
 
     if rows_per_chunk == 0 {
-        return Err(PyValueError::new_err("rows_per_chunk must be greater than 0"));
+        return Err(PyValueError::new_err(
+            "rows_per_chunk must be greater than 0",
+        ));
     }
     if window_size == 0 {
         return Err(PyValueError::new_err("window_size must be greater than 0"));
     }
     if overlap >= window_size {
-        return Err(PyValueError::new_err("overlap must be less than window_size"));
+        return Err(PyValueError::new_err(
+            "overlap must be less than window_size",
+        ));
     }
 
     let rust_start = Instant::now();

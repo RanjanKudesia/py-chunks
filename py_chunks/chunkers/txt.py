@@ -106,3 +106,16 @@ def stream_chunk_txt(
     return _rust.stream_txt_chunks(
         str(path), mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page,
     )
+
+
+def txt_to_markdown(file_path: str) -> str:
+    """Return the contents of a plain-text file as a Markdown string.
+
+    Plain text has no inherent formatting, so the file is returned as-is.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"TXT file not found: {file_path}")
+    if path.suffix.lower() != ".txt":
+        raise ValueError(f"Expected a .txt file, got: {file_path}")
+    return path.read_text(encoding="utf-8", errors="replace")

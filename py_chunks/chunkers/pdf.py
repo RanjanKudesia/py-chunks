@@ -159,3 +159,21 @@ def stream_chunk_pdf(
         sentences_per_chunk,
         paragraphs_per_page,
     )
+
+
+def pdf_to_markdown(file_path: str) -> str:
+    """Convert a PDF file to a Markdown string.
+
+    Args:
+        file_path: Path to the .pdf file.
+
+    Returns:
+        Markdown string with headings, paragraphs, bullet lists, tables,
+        and ``---`` page-break separators.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+    if path.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a .pdf file, got: {file_path}")
+    return _rust.pdf_to_markdown(str(path))

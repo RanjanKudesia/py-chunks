@@ -105,9 +105,16 @@ fn find_notes_for_slide(archive: &mut PptxArchive, slide_name: &str) -> Option<S
     None
 }
 
+pub(super) fn find_notes_for_slide_pub(
+    archive: &mut PptxArchive,
+    slide_name: &str,
+) -> Option<String> {
+    find_notes_for_slide(archive, slide_name)
+}
+
 /// Extracts text from a notes-slide XML.  Reuses the slide parser; body
 /// paragraphs contain the speaker notes (the title slot holds the image).
-fn parse_notes_xml(xml_bytes: &[u8]) -> Option<String> {
+pub(super) fn parse_notes_xml(xml_bytes: &[u8]) -> Option<String> {
     let slide = parse_slide_xml(xml_bytes).ok()?;
     let text = slide
         .body_paragraphs
@@ -815,7 +822,10 @@ mod tests {
     fn parse_slide_xml_empty_body_is_section_divider() {
         let xml = slide_xml("Section Title", "");
         let slide = parse_slide_xml(xml.as_bytes()).unwrap();
-        assert!(slide.is_section_divider(), "title-only slide should be a section divider");
+        assert!(
+            slide.is_section_divider(),
+            "title-only slide should be a section divider"
+        );
     }
 
     #[test]
@@ -869,7 +879,10 @@ mod tests {
             notes_text: None,
         };
         let t = s.all_text();
-        assert!(t.contains("Table:"), "has_table should prefix body with 'Table:'");
+        assert!(
+            t.contains("Table:"),
+            "has_table should prefix body with 'Table:'"
+        );
     }
 
     // ── open_pptx / collect_slide_names ──────────────────────────────────────
@@ -887,7 +900,11 @@ mod tests {
 
     #[test]
     fn collect_slide_names_finds_slides_in_order() {
-        let bytes = make_pptx(&[("Slide 1", "Body 1"), ("Slide 2", "Body 2"), ("Slide 3", "Body 3")]);
+        let bytes = make_pptx(&[
+            ("Slide 1", "Body 1"),
+            ("Slide 2", "Body 2"),
+            ("Slide 3", "Body 3"),
+        ]);
         let archive = open_pptx(&bytes).unwrap();
         let names = collect_slide_names(&archive);
         assert_eq!(names.len(), 3);
@@ -903,15 +920,21 @@ mod tests {
         let mut zip = zip::ZipWriter::new(cursor);
         let opts = zip::write::FileOptions::<()>::default()
             .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("ppt/slides/slideLayout1.xml", opts.clone()).unwrap();
+        zip.start_file("ppt/slides/slideLayout1.xml", opts.clone())
+            .unwrap();
         zip.write_all(b"<layout/>").unwrap();
         zip.start_file("ppt/slides/slide1.xml", opts).unwrap();
-        zip.write_all(slide_xml("Title", "Body").as_bytes()).unwrap();
+        zip.write_all(slide_xml("Title", "Body").as_bytes())
+            .unwrap();
         let bytes = zip.finish().unwrap().into_inner();
 
         let archive = open_pptx(&bytes).unwrap();
         let names = collect_slide_names(&archive);
-        assert_eq!(names.len(), 1, "layout should be excluded, only slide1 present");
+        assert_eq!(
+            names.len(),
+            1,
+            "layout should be excluded, only slide1 present"
+        );
     }
 
     // ── classify_chunk ────────────────────────────────────────────────────────
@@ -931,13 +954,19 @@ mod tests {
     #[test]
     fn classify_chunk_long_text_is_long_paragraph() {
         let text = "x".repeat(CLASSIFY_LONG_CHARS + 1);
-        assert_eq!(classify_chunk(text.as_str()).as_str(), "long_single_paragraph");
+        assert_eq!(
+            classify_chunk(text.as_str()).as_str(),
+            "long_single_paragraph"
+        );
     }
 
     #[test]
     fn classify_chunk_short_text_is_short_paragraph() {
         let text = "x".repeat(CLASSIFY_SHORT_CHARS - 1);
-        assert_eq!(classify_chunk(text.as_str()).as_str(), "short_disconnected_paragraph");
+        assert_eq!(
+            classify_chunk(text.as_str()).as_str(),
+            "short_disconnected_paragraph"
+        );
     }
 
     // ── is_heading_style / looks_like_sentence ────────────────────────────────
@@ -955,7 +984,9 @@ mod tests {
     #[test]
     fn looks_like_sentence_long_text() {
         // ≥8 words → sentence
-        assert!(looks_like_sentence("this is a sentence with eight words here"));
+        assert!(looks_like_sentence(
+            "this is a sentence with eight words here"
+        ));
     }
 
     #[test]

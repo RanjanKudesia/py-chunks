@@ -156,3 +156,13 @@ def stream_chunk_xlsx(
         skip_empty_rows,
         max_chunk_chars,
     )
+
+
+def xlsx_to_markdown(file_path: str) -> str:
+    """Convert an XLSX/XLS file to a Markdown string (one pipe table per sheet)."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
+    if path.suffix.lower() not in (".xlsx", ".xls"):
+        raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
+    return _rust.xlsx_to_markdown(str(path))

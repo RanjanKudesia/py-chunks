@@ -2,11 +2,11 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, PDF, PPTX, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
+Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
 
 ## Features
 
-- **9 Document Formats**: PDF, DOCX, PPTX, Markdown, HTML, TXT, CSV, XLSX, XLS
+- **10 Document Formats**: PDF, DOCX, DOC (Word 97–2003), PPTX, Markdown, HTML, TXT, CSV, XLSX, XLS
 - **7 Chunking Modes for document formats**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
 - **6 Chunking Modes for spreadsheet formats** (XLSX / XLS): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
 - **4 Chunking Modes for CSV**: `row`, `default`, `sliding_window`, `page_aware`
@@ -14,12 +14,14 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - PDF: background Rust thread + `mpsc` channel (all 7 modes, true one-chunk-at-a-time)
   - Markdown / HTML / TXT: block-by-block state machine for `structural` + `semantic`; batch-drain for the rest
   - DOCX: all 7 modes — `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes (lazy chunk emission after a single upfront parse)
+  - DOC: all 7 modes — `DocStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes
   - PPTX: batch-drain (ZIP must be read upfront, then chunks are yielded one at a time)
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
-    - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
+  - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
+- **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (11 extensions: `.doc`, `.docx`, `.pptx`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
 - **Multiple Input Sources**: local file paths, raw `bytes` / `bytearray` / `memoryview`, file-like objects (`BytesIO`, open files), FastAPI / Starlette `UploadFile`, HTTP(S) / S3 pre-signed URLs
 - **Consistent Output Schema**: every chunk is a `dict` with `content`, `content_type`, and `metadata` keys
-- **Zero Python runtime dependencies**: all parsing happens in the Rust extension; the PDFium native binary is bundled inside the wheel
+- **Minimal Python dependencies**: all parsing happens in the Rust extension; PDF support uses [`pypdfium2`](https://pypi.org/project/pypdfium2/) (installed automatically), which bundles the PDFium native binary for every platform
 
 ## Installation
 
@@ -31,9 +33,9 @@ pip install py-chunks
 
 ### PDF native library
 
-PDF chunking uses the PDFium native library, which is bundled inside the wheel — no separate installation needed.
+PDF chunking uses the PDFium native library. It is provided by [`pypdfium2`](https://pypi.org/project/pypdfium2/), which is installed automatically as a dependency and bundles the correct PDFium binary for your platform (macOS, Linux, Windows) — no separate installation needed.
 
-If you need to point to a custom PDFium binary (e.g. a system install or a specific build), set the environment variable before importing:
+To use a custom PDFium binary instead, set the environment variable before importing:
 
 ```bash
 export PDFIUM_LIBRARY_PATH=/path/to/libpdfium.dylib   # macOS
@@ -46,7 +48,7 @@ set PDFIUM_LIBRARY_PATH=C:\path\to\pdfium.dll          # Windows
 ## Quick Start
 
 ```python
-from py_chunks import get_chunks, stream_chunks
+from py_chunks import get_chunks, stream_chunks, get_markdown
 
 # Batch — works for every supported format
 chunks = get_chunks("document.pdf")
@@ -54,6 +56,7 @@ chunks = get_chunks("notes.md",     mode="semantic")
 chunks = get_chunks("page.html",    mode="section")
 chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overlap=1)
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
+chunks = get_chunks("legacy.doc",   mode="default")        # DOC (Word 97-2003)
 chunks = get_chunks("data.xlsx",    mode="row",            rows_per_chunk=5)
 chunks = get_chunks("legacy.xls",   mode="row",            rows_per_chunk=5)
 chunks = get_chunks("data.csv",     mode="row",            rows_per_chunk=10)
@@ -67,6 +70,13 @@ for chunk in chunks:
 # Streaming — works for every supported format
 for chunk in stream_chunks("large.pdf", mode="section"):
     handle(chunk)
+
+# Markdown conversion — get a Markdown string from any supported document
+md = get_markdown("report.docx")
+md = get_markdown("legacy.doc")
+md = get_markdown("data.csv")
+md = get_markdown("notes.txt")
+md = get_markdown(file_bytes, filename="report.pdf")  # bytes also supported
 ```
 
 ---
@@ -110,6 +120,48 @@ chunks = get_chunks("file.docx", mode="page_aware",     paragraphs_per_page=15)
 | `page_aware` | Chunks by explicit page breaks (`w:pageBreak`), section breaks (`w:sectPr`), then paragraph count fallback. Param: `paragraphs_per_page` (default 15). `metadata` includes `page_number`, `page_break_type`, `paragraph_count`. |
 
 > **Streaming**: all 7 DOCX modes are supported by `stream_chunks`. `default`/`structural` use `DocxStructuralIterator`; the other five modes (`section`, `semantic`, `sliding_window`, `sentence`, `page_aware`) each have a dedicated Rust iterator that parses the document once upfront and emits chunks one at a time. Output is byte-for-byte identical to `get_chunks` for every mode.
+
+---
+
+### DOC modes (Word 97–2003)
+
+`.doc` files use the same 7-mode API as DOCX. The parser is a pure Rust implementation using the Compound Binary File (`cfb`) crate — no LibreOffice, no external processes.
+
+```python
+from py_chunks import get_chunks, stream_chunks
+
+chunks = get_chunks("file.doc", mode="default")        # structural (default)
+chunks = get_chunks("file.doc", mode="structural")     # same as default
+chunks = get_chunks("file.doc", mode="section")
+chunks = get_chunks("file.doc", mode="semantic")
+chunks = get_chunks("file.doc", mode="sliding_window", window_size=3, overlap=1)
+chunks = get_chunks("file.doc", mode="sentence",       sentences_per_chunk=3)
+chunks = get_chunks("file.doc", mode="page_aware",     paragraphs_per_page=15)
+
+# Streaming — all 7 modes supported
+for chunk in stream_chunks("file.doc", mode="semantic"):
+    process(chunk)
+```
+
+| Mode | Description |
+|---|---|
+| `default` / `structural` | One chunk per paragraph element: heading, normal paragraph, table row, list item. Short paragraphs (< 80 chars) are merged into a single `short_disconnected_paragraph` chunk. |
+| `section` | All paragraphs under a heading grouped into one chunk (≤ 2 000 chars, split if longer). |
+| `semantic` | Paragraphs merged by keyword overlap and reference continuity (≤ 1 200 chars). |
+| `sliding_window` | Overlapping windows of N paragraphs. Params: `window_size` (default 3), `overlap` (default 1). |
+| `sentence` | N sentences per chunk, split without NLP. Param: `sentences_per_chunk` (default 3). |
+| `page_aware` | Chunks by explicit page-break markers in the binary stream, with paragraph-count fallback. Param: `paragraphs_per_page` (default 15). |
+
+**Format notes**:
+- Only Word 97–2003 (`.doc`) binary format is supported. Pre-Word 97 files raise `RuntimeError: Pre-Word 97 .doc files are not supported. Convert to .docx first.`
+- Text is reconstructed from the piece table (CLX), supporting both compressed CP1252 and Unicode UTF-16LE pieces.
+- Heading levels are inferred from the stylesheet (`Stshf`) style index. All-caps or title-case short lines are promoted to `Heading(2)` as a fallback.
+- Table cells (separated by `\x07` in the binary stream) are joined with ` | ` in chunk content.
+- Page breaks (`\x0C`) flush the current page group; they are not emitted as content.
+
+> **Markdown conversion**: `get_markdown("file.doc")` converts the `.doc` to Markdown — headings become `#`/`##`/`###`, list items become `- item`, table rows become `| cell | cell |`, and page breaks become `---`.
+
+> **Streaming**: all 7 modes are supported. `default`/`structural` use `DocStructuralIterator`; the other five modes each have a dedicated Rust iterator.
 
 ---
 
@@ -315,6 +367,76 @@ CSV-specific options:
 
 ---
 
+## Markdown Conversion
+
+`get_markdown()` converts a document to a Markdown string in a single call. Use it when you want the full document as Markdown rather than split into chunks — for example, to feed into an LLM context window, display in a UI, or pipe into another tool.
+
+```python
+from py_chunks import get_markdown
+
+# From a file path
+md = get_markdown("report.docx")
+md = get_markdown("legacy.doc")
+md = get_markdown("deck.pptx")
+md = get_markdown("paper.pdf")
+md = get_markdown("page.html")
+md = get_markdown("notes.md")       # returned as-is
+md = get_markdown("readme.txt")     # returned as-is
+md = get_markdown("data.xlsx")
+md = get_markdown("data.csv")
+
+# From bytes (e.g. API upload)
+md = get_markdown(file_bytes, filename="report.docx")
+
+# From a file-like object
+from io import BytesIO
+md = get_markdown(BytesIO(data), filename="document.pdf")
+```
+
+### Supported extensions for `get_markdown`
+
+| Extension(s) | What is produced |
+|---|---|
+| `.docx` | Full fidelity: headings (`#`–`######` from Word heading styles / outline levels), unordered lists (`- item`), ordered lists (`1. item`) with per-level indentation, pipe tables, fenced code blocks, images as `[Image: alt]` / `[Image]`, hyperlinks as `[text](url)`, page/section breaks as `---`, footnotes and endnotes as `[^id]: text` appended at the end |
+| `.doc` | H1 → `#`, H2–H3 → `##`, H4+ → `###`; lists → `- item`; each table paragraph → pipe row with `\| --- \|` separator; page breaks → `---`; plain paragraphs as-is |
+| `.pptx` | Presentation title → `# Title`; PPTX sections → `# Section Name`; each slide → `## Slide N: Title` (or `## Slide N`); paragraphs as plain text; unordered bullets (`- item`) and ordered bullets (`1. item`) with per-level indentation; pipe tables; image placeholders (`[Image: alt]`); speaker notes as `> **Notes:** …`; slides/sections separated by `---` |
+| `.pdf` | Headings inferred from font size vs document average → `#` / `##` / `###`; bullet lists preserved or normalized to `- item`; tables detected by tab/multi-space alignment → pipe tables; page boundaries → `---` |
+| `.html`, `.htm` | H1–H6 → `#`–`######`; paragraphs as plain text; ordered lists → `1. item`; unordered lists → `- item`; code blocks → fenced ` ``` `; pipe tables with auto-detected header row; `\|` in cells escaped |
+| `.xlsx`, `.xls` | Each non-empty sheet → `## SheetName` heading + pipe table (auto-detected header row); sheets separated by `---`; `\|` in cells escaped |
+| `.csv` | Single pipe table; first row = header with `\| --- \|` separator; `\|` in cells escaped; empty rows skipped; delimiter auto-detected or manually set; accepts `delimiter` and `encoding` params — see `csv_to_markdown` below |
+| `.md` | Returned as-is (already Markdown — no transformation) |
+| `.txt` | Returned as-is (plain text — no transformation) |
+
+### `get_markdown` signature
+
+```python
+get_markdown(
+    source,
+    *,
+    filename: str | None = None,
+) -> str
+```
+
+| Parameter | Type | Description |
+|---|---|---|
+| `source` | str, Path, bytes, bytearray, memoryview, file-like | Document source. Local file path, raw bytes, or file-like object. |
+| `filename` | str \| None | Required when source is `bytes`, `bytearray`, `memoryview`, or a file-like object without a `.name` attribute. |
+
+**Returns** — `str`. The full document rendered as a Markdown string.
+
+**Raises**
+
+| Exception | Condition |
+|---|---|
+| `FileNotFoundError` | Path does not exist |
+| `ValueError` | Unsupported extension or missing `filename` for bytes / fileobj inputs |
+| `TypeError` | Unsupported source type |
+| `RuntimeError` | Rust-level failure (e.g. scanned PDF with no text layer) |
+
+> **Note**: `get_markdown` does not support URLs. For URL sources, download the bytes first and pass them with a `filename`.
+
+---
+
 ## Streaming
 
 ### When to use streaming
@@ -333,6 +455,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 | **HTML** | All 7 | Same as Markdown | Identical hybrid model: state machine for `structural` / `semantic`, batch-drain for `section` / `sliding_window` / `sentence` / `page_aware`. |
 | **TXT** | All 7 | Same as Markdown | Pure Rust, no threads. |
 | **DOCX** | All 7 | `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Full document parsed once upfront; chunks emitted lazily. Peak memory ≈ file size + chunk vec. Output equals `get_chunks` for every mode. |
+| **DOC** | All 7 | `DocStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Binary stream parsed once upfront via piece table reconstruction; chunks emitted lazily. Output equals `get_chunks` for every mode. |
 | **PPTX** | All 7 | Batch-drain | PPTX requires the full ZIP up front, so chunks are computed once at construction and yielded one per `__next__`. |
 | **XLSX / XLS** | All 6 | State machine for `row` / `sliding_window`; batch-drain for `table` / `sheet` / `page_aware` / `semantic` | calamine reads the full file on open (no incremental I/O at format level). `row` and `sliding_window` build one chunk per `__next__` from pre-parsed row data. The other four modes require global analysis first and materialise all chunks at iterator construction. Output is identical to `chunk_xlsx` for every mode. |
 | **CSV** | All 3 | Background thread + `mpsc` channel for `row` / `default` / `page_aware`; `VecDeque` rolling buffer for `sliding_window` | True line-by-line worker — never loads the full file. `sliding_window` streaming uses an O(window_size) rolling buffer. Output is identical to `chunk_csv` for every mode. |
@@ -364,6 +487,13 @@ for chunk in stream_chunks("document.docx", mode="section"):      index(chunk)
 for chunk in stream_chunks("document.docx", mode="sentence", sentences_per_chunk=3):   embed(chunk)
 for chunk in stream_chunks("document.docx", mode="sliding_window", window_size=3, overlap=1): embed(chunk)
 for chunk in stream_chunks("document.docx", mode="page_aware",   paragraphs_per_page=15): store(chunk)
+
+# DOC (Word 97-2003) — all 7 modes
+for chunk in stream_chunks("legacy.doc", mode="structural"):      send_to_queue(chunk)
+for chunk in stream_chunks("legacy.doc", mode="semantic"):        process(chunk)
+for chunk in stream_chunks("legacy.doc", mode="section"):         index(chunk)
+for chunk in stream_chunks("legacy.doc", mode="sentence", sentences_per_chunk=3): embed(chunk)
+for chunk in stream_chunks("legacy.doc", mode="page_aware", paragraphs_per_page=15): store(chunk)
 
 # PPTX — any mode
 for chunk in stream_chunks("deck.pptx", mode="semantic"):
@@ -432,6 +562,8 @@ Or use the explicit source-specific helpers:
 | `stream_chunks_from_upload(upload_file, ...)` | FastAPI UploadFile (streaming) |
 | `stream_chunks_from_s3_presigned_url(url, ...)` | Presigned URL (streaming) |
 
+> **Note**: `get_markdown` accepts file paths, bytes, and file-like objects, but does **not** support URLs. Download the content first and pass as bytes with a `filename`.
+
 ---
 
 ## Supported Formats
@@ -440,6 +572,7 @@ Or use the explicit source-specific helpers:
 |---|---|---|---|
 | PDF        | `.pdf`            | All 7 | All 7 (background thread) |
 | DOCX       | `.docx`           | All 7 | All 7 (dedicated iterator per mode) |
+| DOC        | `.doc`            | All 7 | All 7 (dedicated iterator per mode) |
 | PPTX       | `.pptx`           | All 7 | All 7 (batch-drain) |
 | Markdown   | `.md`             | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | HTML       | `.html`, `.htm`   | All 7 | All 7 (state machine for `structural` / `semantic`) |
@@ -452,6 +585,8 @@ The 7 document modes are: `default`, `structural`, `section`, `semantic`, `slidi
 The 6 spreadsheet modes are: `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`.
 
 The 3 CSV modes are: `row` / `default`, `sliding_window`, `page_aware`.
+
+**`get_markdown` supported extensions**: `.doc`, `.docx`, `.pptx`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`
 
 ---
 
@@ -485,19 +620,27 @@ stream_chunks(
 ) -> Iterator[dict]
 ```
 
+```python
+get_markdown(
+    source,
+    *,
+    filename: str | None = None,
+) -> str
+```
+
 **Parameters**
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `source` | str, Path, bytes, file-like, upload, URL | — | Document source. Auto-detected. |
+| `source` | str, Path, bytes, file-like, upload, URL | — | Document source. Auto-detected. (`get_markdown` does not support URLs.) |
 | `filename` | str \| None | None | Required when source is `bytes` or a file object without a `.name` attribute. |
-| `mode` | str | `"default"` | Chunking mode. Applies to **every** supported format (PDF, DOCX, PPTX, MD, HTML, TXT). One of `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`. |
+| `mode` | str | `"default"` | Chunking mode. Applies to **every** supported format (PDF, DOCX, DOC, PPTX, MD, HTML, TXT). One of `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`. |
 | `window_size` | int | 3 | Number of blocks per window (`sliding_window` mode). Must be `> 0`. |
 | `overlap` | int | 1 | Overlapping blocks between windows (`sliding_window` mode). Must be `< window_size`. |
 | `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. |
 | `paragraphs_per_page` | int | 15 | Block / paragraph quota before a page flush (`page_aware` mode). Must be `> 0`. For **PPTX** this means *slides per chunk* and the format-level default is `5`. |
 
-**Returns** — `list[dict]` (batch) or `Iterator[dict]` (streaming). Each chunk dict:
+**Returns** — `list[dict]` (batch) or `Iterator[dict]` (streaming) or `str` (`get_markdown`). Each chunk dict:
 
 ```python
 {
@@ -514,7 +657,7 @@ stream_chunks(
 | `FileNotFoundError` | Path does not exist |
 | `ValueError` | Unsupported extension, invalid mode, or bad parameter |
 | `TypeError` | Unsupported source type or async `.read()` on upload |
-| `RuntimeError` | Rust-level failure (e.g. no extractable text in PDF) |
+| `RuntimeError` | Rust-level failure (e.g. no extractable text in PDF, pre-Word 97 `.doc` file) |
 | `NotImplementedError` | Streaming requested for an unsupported format/mode |
 
 ---
@@ -524,14 +667,15 @@ stream_chunks(
 Each format also has a direct module that returns `(chunks, timing)`, where `timing` is `{"rust_ms": float, "python_ms": float}`. Use these when you want per-call timing data or when you only need one format and want to skip source-type detection.
 
 ```python
-from py_chunks.chunkers.pdf  import chunk_pdf,  stream_chunk_pdf
-from py_chunks.chunkers.docx import chunk_docx, stream_chunk_docx
-from py_chunks.chunkers.pptx import chunk_pptx, stream_chunk_pptx, chunk_pptx_with_strategy
-from py_chunks.chunkers.html import chunk_html, stream_chunk_html
-from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md
-from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt
-from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx  # handles both .xlsx and .xls
-from py_chunks.chunkers.csv  import chunk_csv,  stream_chunk_csv
+from py_chunks.chunkers.pdf  import chunk_pdf,  stream_chunk_pdf,  pdf_to_markdown
+from py_chunks.chunkers.docx import chunk_docx, stream_chunk_docx, docx_to_markdown
+from py_chunks.chunkers.doc  import chunk_doc,  stream_chunk_doc,  doc_to_markdown
+from py_chunks.chunkers.pptx import chunk_pptx, stream_chunk_pptx, chunk_pptx_with_strategy, pptx_to_markdown
+from py_chunks.chunkers.html import chunk_html, stream_chunk_html, html_to_markdown
+from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md,   md_to_markdown
+from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt,  txt_to_markdown
+from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx, xlsx_to_markdown  # handles both .xlsx and .xls
+from py_chunks.chunkers.csv  import chunk_csv,  stream_chunk_csv,  csv_to_markdown
 
 # Batch with timing
 chunks, timing = chunk_pdf("file.pdf", mode="section")
@@ -541,16 +685,21 @@ chunks, timing = chunk_md("notes.md", mode="semantic")
 chunks, timing = chunk_html("page.html", mode="sliding_window", window_size=4, overlap=1)
 chunks, timing = chunk_txt("log.txt", mode="sentence", sentences_per_chunk=2)
 chunks, timing = chunk_pptx("deck.pptx", mode="page_aware", paragraphs_per_page=5)
+chunks, timing = chunk_doc("legacy.doc", mode="section")
 
 # Legacy PPTX strategy wrapper (kept for backward compatibility)
 chunks, timing = chunk_pptx_with_strategy("deck.pptx", strategy="structural")
 
 # Streaming — all formats
 for chunk in stream_chunk_pdf("report.pdf", mode="semantic"):          ...
-for chunk in stream_chunk_docx("doc.docx", mode="structural"):         ...  # all 7 modes supported
+for chunk in stream_chunk_docx("doc.docx", mode="structural"):         ...
 for chunk in stream_chunk_docx("doc.docx", mode="semantic"):           ...
 for chunk in stream_chunk_docx("doc.docx", mode="section"):            ...
 for chunk in stream_chunk_docx("doc.docx", mode="sentence", sentences_per_chunk=3): ...
+for chunk in stream_chunk_doc("legacy.doc", mode="structural"):        ...
+for chunk in stream_chunk_doc("legacy.doc", mode="semantic"):          ...
+for chunk in stream_chunk_doc("legacy.doc", mode="section"):           ...
+for chunk in stream_chunk_doc("legacy.doc", mode="sentence", sentences_per_chunk=3): ...
 for chunk in stream_chunk_md("book.md", mode="sentence", sentences_per_chunk=2): ...
 for chunk in stream_chunk_html("page.html", mode="section"):           ...
 for chunk in stream_chunk_txt("log.txt", mode="page_aware", paragraphs_per_page=20): ...
@@ -579,6 +728,18 @@ chunks, timing = chunk_csv("data.csv", mode="row",            delimiter="\t", en
 for chunk in stream_chunk_csv("data.csv", mode="row",            rows_per_chunk=50):          ...
 for chunk in stream_chunk_csv("data.csv", mode="sliding_window", window_size=5, overlap=1):   ...
 for chunk in stream_chunk_csv("data.csv", mode="page_aware",     rows_per_chunk=100):         ...
+
+# Markdown conversion — direct format wrappers
+md = docx_to_markdown("report.docx")          # full DOCX → Markdown (headings, lists, tables, footnotes, hyperlinks…)
+md = doc_to_markdown("legacy.doc")            # DOC binary → Markdown (headings, lists, tables, page breaks)
+md = pdf_to_markdown("paper.pdf")             # PDF → Markdown (headings by font size, lists, tables, page separators)
+md = pptx_to_markdown("deck.pptx")           # PPTX → Markdown (title, sections, slides as ##, notes as blockquote)
+md = html_to_markdown("page.html")            # HTML → Markdown (H1-H6, lists, tables, code blocks)
+md = xlsx_to_markdown("data.xlsx")            # each sheet → ## heading + pipe table, separated by ---
+md = csv_to_markdown("data.csv")              # pipe table, first row = header
+md = csv_to_markdown("data.csv", delimiter=",", encoding="utf-8")   # explicit delimiter + encoding
+md = txt_to_markdown("notes.txt")             # returned as-is
+md = md_to_markdown("readme.md")              # returned as-is
 ```
 
 ---
@@ -605,7 +766,7 @@ for chunk in stream_chunk_csv("data.csv", mode="page_aware",     rows_per_chunk=
 | `table` | Tabular data |
 | `code_block` | Code or preformatted text |
 | `long_single_paragraph` | Paragraph > 500 characters |
-| `short_disconnected_paragraph` | Paragraph < 80 characters |
+| `short_disconnected_paragraph` | Paragraph < 80 characters (also used for merged short paragraphs in DOC/DOCX structural mode) |
 | `mixed_content` | DOCX structural block that merges a heading with its immediately following body element (e.g. a heading run that shares a `<w:p>` with body text) |
 | `section` | Heading-scoped grouped content (`section` mode) |
 | `semantic` | Heuristic topic-continuity group (`semantic` mode) |
@@ -628,22 +789,28 @@ Metadata is a `dict` whose keys depend on both the format and the mode. The most
 |---|---|---|
 | `default` / `structural` | PDF | `page_number`, `is_heading`, `avg_font_size` |
 | `default` / `structural` | DOCX | `section_heading`, `section_heading_level`, `footnotes` (list of `{id, text}`), `endnotes` (list of `{id, text}`), `page_number`, `document_metadata` (`header_text`, `footer_text`, `image_count`). Inline images are emitted as `[Image: <alt>]` (or `[Image]` when no alt text). Footnote / endnote ids reference `word/footnotes.xml` / `word/endnotes.xml` and are anchored to the chunk that contains the referring paragraph. |
+| `default` / `structural` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type` (`heading`/`normal`/`table`/`list_item`), `heading_level` (1–6 or null), `page_number` (always null — not available in the binary format) |
 | `default` / `structural` | MD / HTML / TXT | `section_heading`, `document_metadata.source_type` |
 | `default` / `structural` | PPTX | `slide_number`, `section_heading` (when detectable) |
 | `section` | PDF | `page_number`, `section_heading`, `section_level`, `heading_path`, `paragraph_count`, `heading_font_size` |
 | `section` | DOCX | `section_heading`, `section_heading_level`, `section_level`, `heading_path`, `document_metadata` |
+| `section` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type`, `heading_level`, `page_number` |
 | `section` | MD / HTML / TXT / PPTX | `section_heading`, `section_level`, `heading_path`, `paragraph_count` |
 | `semantic` | PDF | `page_number`, `paragraph_count`, `merge_reason` |
 | `semantic` | DOCX | `section_heading`, `section_heading_level`, `paragraph_count`, `merge_reason`, `document_metadata` |
+| `semantic` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type`, `heading_level`, `page_number` |
 | `semantic` | MD / HTML / TXT / PPTX | `paragraph_count`, `merge_reasons` (list), `primary_merge_reason`, `keyword_density`, `avg_block_length` (MD/TXT), `section_heading`, `heading_path`, `chunk_index`, `document_metadata` |
 | `sentence` | PDF | `sentences_per_chunk`, `actual_sentence_count`, `chunk_index`, `source_paragraph_index` |
 | `sentence` | DOCX | `sentences_per_chunk`, `actual_sentence_count`, `chunk_index`, `source_paragraph_index`, `source_paragraph_is_heading`, `source_paragraph_heading_level`, `source_paragraph_is_list`, `source_paragraph_is_table`, `document_metadata` |
+| `sentence` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type`, `heading_level`, `page_number` |
 | `sentence` | MD / HTML / TXT / PPTX | `sentences_per_chunk`, `actual_sentence_count`, `chunk_index`, `source_paragraph_index` |
 | `sliding_window` | PDF | `window_size`, `overlap`, `window_index`, `paragraph_count`, `paragraph_range`, `page_number` |
 | `sliding_window` | DOCX | `window_size`, `overlap`, `window_index`, `paragraph_indices`, `list_item_count`, `heading_count`, `paragraph_meta`, `document_metadata` |
+| `sliding_window` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type`, `heading_level`, `page_number` |
 | `sliding_window` | MD / HTML / TXT / PPTX | `window_size`, `overlap`, `window_index`, `paragraph_count`, `paragraph_range` |
 | `page_aware` | PDF | `page_number`, `page_break_type`, `paragraph_count`, `document_metadata` |
 | `page_aware` | DOCX | `page_number`, `page_break_type`, `paragraph_count`, `section_heading_level`, `headings`, `list_item_count`, `table_count`, `document_metadata` |
+| `page_aware` | DOC | `source`, `chunk_index`, `total_chunks`, `paragraph_type`, `heading_level`, `page_number` |
 | `page_aware` | MD / HTML / TXT | `page_number`, `page_break_type` (heading-boundary or paragraph-count), `paragraph_count` |
 | `page_aware` | PPTX | `slide_numbers`, `paragraph_count` |
 
@@ -672,6 +839,34 @@ for chunk in chunks:
     print(chunk["content"][:120])
 ```
 
+### Legacy `.doc` file (Word 97-2003)
+
+```python
+from py_chunks import get_chunks, get_markdown
+
+# Chunk the document
+chunks = get_chunks("contract.doc", mode="section")
+for chunk in chunks:
+    print(chunk["metadata"]["heading_level"], chunk["content"][:80])
+
+# Or convert the whole thing to Markdown
+md = get_markdown("contract.doc")
+print(md)
+```
+
+### Convert any document to Markdown
+
+```python
+from py_chunks import get_markdown
+
+# Works for all 11 supported extensions
+for path in ["report.docx", "legacy.doc", "deck.pptx", "paper.pdf",
+             "data.xlsx", "data.csv", "notes.txt", "readme.md"]:
+    md = get_markdown(path)
+    print(f"--- {path} ---")
+    print(md[:500])
+```
+
 ### Streaming a large PDF section-by-section
 
 ```python
@@ -685,10 +880,13 @@ for chunk in stream_chunks("large.pdf", mode="section"):
 ### From bytes (API upload)
 
 ```python
-from py_chunks import get_chunks_from_bytes
+from py_chunks import get_chunks_from_bytes, get_markdown
 
 file_bytes = request.files['document'].read()
 chunks = get_chunks_from_bytes(file_bytes, filename="report.pdf")
+
+# Or get Markdown from bytes
+md = get_markdown(file_bytes, filename="report.docx")
 ```
 
 ### From file-like object
@@ -746,6 +944,21 @@ async def chunk_stream(file: UploadFile = File(...)):
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 ```
 
+### FastAPI — Markdown conversion endpoint
+
+```python
+from fastapi import FastAPI, File, UploadFile
+from py_chunks import get_markdown
+
+app = FastAPI()
+
+@app.post("/markdown/")
+async def to_markdown(file: UploadFile = File(...)):
+    data = await file.read()
+    md = get_markdown(data, filename=file.filename)
+    return {"markdown": md}
+```
+
 ### Flask
 
 ```python
@@ -796,6 +1009,7 @@ def process_document(file_path: str):
 │           Python Public API                  │
 │         (py_chunks/__init__.py)              │
 │   get_chunks()  /  stream_chunks()           │
+│   get_markdown()                             │
 │   *_from_path / _from_bytes / _from_fileobj  │
 │   *_from_upload / _from_s3_presigned_url     │
 └──────────────┬───────────────────────────────┘
@@ -804,11 +1018,12 @@ def process_document(file_path: str):
 ┌──────────────────────────────────────────────┐
 │            Format Dispatcher                 │
 │        (py_chunks/chunkers/*.py)             │
-│   chunk_pdf / chunk_docx / chunk_pptx /      │
-│   chunk_md  / chunk_html / chunk_txt  /      │
-│   chunk_xlsx (handles .xlsx + .xls)   /      │
+│   chunk_pdf / chunk_docx / chunk_doc  /      │
+│   chunk_pptx / chunk_md / chunk_html /       │
+│   chunk_txt / chunk_xlsx (xlsx + xls) /      │
 │   chunk_csv                           +      │
-│   matching stream_chunk_* variants           │
+│   matching stream_chunk_* variants    +      │
+│   *_to_markdown conversion wrappers          │
 └──────────────┬───────────────────────────────┘
                │  validates args, dispatches to the right Rust function,
                │  measures Python-side timing
@@ -825,6 +1040,7 @@ def process_document(file_path: str):
 │    sentence.rs                                                   │
 │    page_aware.rs                                                 │
 │    stream_iter.rs  — streaming iterator(s)                       │
+│    to_markdown.rs  — Markdown conversion function                │
 │                                                                  │
 │  PDF stream    — background thread owns PdfDocument; sends       │
 │                  RawChunk through mpsc channel; __next__ recvs   │
@@ -832,6 +1048,10 @@ def process_document(file_path: str):
 │                  semantic; batch-drain for the other 4 modes     │
 │  DOCX stream   — DocxStructuralIterator (default/structural) +   │
 │                  per-mode iterators for all other 5 modes        │
+│  DOC           — cfb crate opens Compound Binary File;           │
+│                  FIB → piece table (CLX) → paragraph props       │
+│                  (PlcfBtePapx) → stylesheet (Stshf);             │
+│                  DocStructuralIterator + per-mode iterators      │
 │  PPTX stream   — batch-drain (ZIP must be read upfront)          │
 │  XLSX/XLS      — open_workbook_auto() handles both formats;      │
 │    row / sliding_window: state machine, one chunk per __next__   │
@@ -851,13 +1071,14 @@ def process_document(file_path: str):
 - **Temp-file strategy for bytes** — bytes / file-like / URL inputs are written to a `NamedTemporaryFile` (with the original extension), passed to Rust, then deleted; streaming variants wrap the iterator in `_StreamingFileCleanup` so the temp file is removed even on early exit
 - **PDF streaming safety** — the background worker owns the `PdfDocument` for its full lifetime; chunks cross the thread boundary as plain `RawChunk` structs through `mpsc`, so no `unsafe` is needed
 - **Streaming parity** — every streaming iterator yields the same chunks (and metadata) as the corresponding batch function
+- **Pure Rust DOC parsing** — the `.doc` binary format is parsed entirely in Rust using the `cfb` crate with no external processes; text reconstruction, heading detection, and paragraph classification all happen at compile-time-checked byte offsets
 
 ---
 
 ## Error Handling
 
 ```python
-from py_chunks import get_chunks
+from py_chunks import get_chunks, get_markdown
 
 # File not found
 try:
@@ -869,7 +1090,13 @@ except FileNotFoundError as e:
 try:
     chunks = get_chunks("image.png")
 except ValueError as e:
-    print(e)   # Unsupported file type '.png'. Supported: .csv, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
+    print(e)   # Unsupported file type '.png'. Supported: .csv, .doc, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
+
+# Pre-Word 97 .doc file (not supported)
+try:
+    chunks = get_chunks("ancient.doc")
+except RuntimeError as e:
+    print(e)   # Pre-Word 97 .doc files are not supported. Convert to .docx first.
 
 # Scanned / image-only PDF (no text layer)
 try:
@@ -888,6 +1115,12 @@ try:
     chunks = get_chunks("notes.md", mode="sliding_window", window_size=2, overlap=2)
 except ValueError as e:
     print(e)   # overlap must be less than window_size
+
+# get_markdown with unsupported extension
+try:
+    md = get_markdown("image.png")
+except ValueError as e:
+    print(e)   # get_markdown does not support '.png'. Supported: ['.csv', '.doc', ...]
 ```
 
 ### Exceptions raised
@@ -897,7 +1130,7 @@ except ValueError as e:
 | `FileNotFoundError` | A path was given but does not exist on disk. |
 | `ValueError` | Unsupported extension, unknown mode, empty bytes, invalid `window_size` / `overlap` / `sentences_per_chunk` / `paragraphs_per_page`, missing `filename` for bytes / fileobj / URL inputs. |
 | `TypeError` | Unsupported source type, or `upload_file.read()` returned a coroutine (async). Pass `upload_file.file` instead, or `await` it yourself. |
-| `RuntimeError` | Rust-level failure (e.g. PDF with no extractable text, malformed DOCX/PPTX ZIP, unreadable file). |
+| `RuntimeError` | Rust-level failure (e.g. PDF with no extractable text, malformed DOCX/PPTX ZIP, pre-Word 97 `.doc` file, unreadable file). |
 | `NotImplementedError` | A streaming mode/format combination that is not supported. |
 
 ---

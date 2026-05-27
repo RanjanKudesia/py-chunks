@@ -4,13 +4,13 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.3.1"
+version = "0.4.0"
 description = "Rust-backed Python chunking library"
 requires-python = ">=3.9"
 dependencies = ["pypdfium2"]
 license = { text = "MIT" }
 readme = "README.md"
-keywords = ["chunking", "document", "pdf", "docx", "xlsx", "csv", "rust"]
+keywords = ["chunking", "document", "pdf", "docx", "doc", "xlsx", "csv", "markdown", "rust"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",

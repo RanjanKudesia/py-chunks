@@ -39,7 +39,7 @@ const TRANSITION_STARTS: [&str; 12] = [
 use super::super::shared::STOPWORDS;
 
 #[derive(Debug, Clone)]
-struct PdfSpan {
+pub(crate) struct PdfSpan {
     text: String,
     font_size: f32,
     page_number: usize,
@@ -47,7 +47,7 @@ struct PdfSpan {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct ParagraphRecord {
+pub(crate) struct ParagraphRecord {
     pub paragraph: Paragraph,
     pub page_number: usize,
     pub paragraph_index: usize,
@@ -143,7 +143,7 @@ pub(super) fn classify_chunk_structural(
     classify_chunk(text)
 }
 
-fn extract_spans_from_doc(doc: &PdfDocument<'_>) -> Vec<PdfSpan> {
+pub(crate) fn extract_spans_from_doc(doc: &PdfDocument<'_>) -> Vec<PdfSpan> {
     let mut spans: Vec<PdfSpan> = Vec::new();
 
     for (page_idx, page) in doc.pages().iter().enumerate() {
@@ -218,7 +218,7 @@ fn extract_spans_from_doc(doc: &PdfDocument<'_>) -> Vec<PdfSpan> {
     spans
 }
 
-fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize, f32)> {
+pub(crate) fn group_spans_into_paragraphs(spans: Vec<PdfSpan>) -> Vec<(String, bool, usize, f32)> {
     if spans.is_empty() {
         return Vec::new();
     }
@@ -428,7 +428,7 @@ fn resolve_pdfium_library_path() -> Option<String> {
         .clone()
 }
 
-pub(super) fn get_pdfium() -> Result<Pdfium, String> {
+pub(crate) fn get_pdfium() -> Result<Pdfium, String> {
     if let Some(path) = resolve_pdfium_library_path() {
         if let Some(parent) = std::path::Path::new(&path).parent() {
             add_library_search_path(parent);
@@ -495,7 +495,7 @@ fn windows_preload_pdfium(path: &str) {
     }
 }
 
-fn collect_paragraph_records(
+pub(crate) fn collect_paragraph_records(
     grouped_paragraphs: Vec<(String, bool, usize, f32)>,
 ) -> Vec<ParagraphRecord> {
     let mut paragraph_records: Vec<ParagraphRecord> = Vec::new();
@@ -578,7 +578,7 @@ fn collect_paragraph_records(
     paragraph_records
 }
 
-fn infer_section_level(heading_font_size: f32, doc_avg_font_size: f32) -> u8 {
+pub(crate) fn infer_section_level(heading_font_size: f32, doc_avg_font_size: f32) -> u8 {
     if heading_font_size >= doc_avg_font_size * 1.9 {
         1
     } else if heading_font_size >= doc_avg_font_size * 1.6 {

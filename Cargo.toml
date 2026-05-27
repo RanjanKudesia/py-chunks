@@ -20,3 +20,4 @@ pdfium-render = { version = "0.8", features = ["sync"] }
 calamine = { version = "0.26", features = ["dates"] }
 csv = "1"
 encoding_rs = "0.8"
+cfb = "0.10"

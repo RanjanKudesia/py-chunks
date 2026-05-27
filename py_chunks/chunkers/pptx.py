@@ -156,3 +156,13 @@ def stream_chunk_pptx(
     return _rust.stream_pptx_chunks(
         str(path), mode, window_size, overlap, sentences_per_chunk, _slides,
     )
+
+
+def pptx_to_markdown(file_path: str) -> str:
+    """Convert a PPTX file to a Markdown string."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PPTX file not found: {file_path}")
+    if path.suffix.lower() != ".pptx":
+        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    return _rust.pptx_to_markdown(str(path))

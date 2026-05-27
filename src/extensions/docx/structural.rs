@@ -806,7 +806,7 @@ fn find_next_wt_tag_start(xml: &str, from: usize) -> Option<usize> {
     None
 }
 
-fn extract_notes_map(xml: &str, tag: &str) -> HashMap<String, String> {
+pub(super) fn extract_notes_map(xml: &str, tag: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let open_marker = format!("<w:{tag}");
     let close_marker = format!("</w:{tag}>");
@@ -884,7 +884,7 @@ fn first_tag_attr(block: &str, attr: &str) -> Option<String> {
     None
 }
 
-fn read_zip_entry<R: Read + std::io::Seek>(
+pub(super) fn read_zip_entry<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
     max_bytes: u64,

@@ -164,6 +164,7 @@ pub(super) struct DocxBlock {
     pub text: String,
     pub has_drawing: bool,
     pub is_list: bool,
+    pub list_level: u8,
     pub heading_style: Option<String>,
     pub outline_level: Option<u32>,
     pub page_break: bool,
@@ -183,6 +184,15 @@ pub(super) struct DocxBlock {
     /// Same as `footnote_refs` but for `<w:endnoteReference>` →
     /// `word/endnotes.xml`.
     pub endnote_refs: Vec<String>,
+    /// `<w:numId w:val="N"/>` from `<w:numPr>`. Used by `to_markdown` to look
+    /// up the list format (ordered vs bullet) in `word/numbering.xml`.
+    /// `None` for non-list paragraphs and table blocks.
+    pub num_id: Option<u32>,
+    /// Hyperlinks in this paragraph: `(anchor_text, r:id)` pairs in document
+    /// order. The `r:id` value is resolved to a URL against
+    /// `word/_rels/document.xml.rels` by the markdown serialiser.
+    /// Empty for table blocks and paragraphs with no `<w:hyperlink>`.
+    pub hyperlinks: Vec<(String, String)>,
 }
 
 /// Parse a `.docx` byte slice into a flat list of paragraphs, flattening
@@ -314,6 +324,11 @@ struct TableState {
     /// One flag per completed row indicating whether `<w:tblHeader/>` was
     /// present in its `<w:trPr>`.
     header_row_flags: Vec<bool>,
+    /// Cell content from the most recently completed row, indexed by column.
+    /// Used to repeat content in vertically-merged continuation cells.
+    vmerge_col_content: Vec<String>,
+    /// Whether the current cell is a vMerge continuation (no "restart").
+    cur_cell_is_vmerge_continuation: bool,
 }
 
 fn escape_md_cell(s: &str) -> String {
@@ -471,6 +486,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
     let mut para_text = String::new();
     let mut para_sub_texts: Vec<String> = Vec::new();
     let mut para_is_list = false;
+    let mut para_list_level: u8 = 0;
     let mut para_has_drawing = false;
     let mut para_has_page_break = false;
     let mut para_has_section_break = false;
@@ -480,10 +496,20 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
     let mut para_image_alt: Option<String> = None;
     let mut para_footnote_refs: Vec<String> = Vec::new();
     let mut para_endnote_refs: Vec<String> = Vec::new();
+    let mut para_num_id: Option<u32> = None;
+    let mut in_hyperlink = false;
+    let mut hyperlink_rid = String::new();
+    let mut hyperlink_text = String::new();
+    let mut para_hyperlinks: Vec<(String, String)> = Vec::new();
     // Depth counter for `<w:drawing>` so we only harvest alt attributes
     // from `<wp:docPr>` / `<pic:cNvPr>` while we are actually inside a
     // drawing (those local names also appear in shape XML elsewhere).
     let mut drawing_depth: u32 = 0;
+    let mut in_run = false;
+    let mut in_rpr = false;
+    let mut cur_bold = false;
+    let mut cur_italic = false;
+    let mut cur_run_text = String::new();
 
     // Stack of in-progress tables. Empty when we're at top-level body
     // content. Pushed on `<w:tbl>` Start, popped on `<w:tbl>` End. Nested
@@ -517,6 +543,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                         top.in_cell = true;
                         top.current_cell.clear();
                         top.cell_span = 1;
+                        top.cur_cell_is_vmerge_continuation = false;
                     }
                 } else if qname_eq(name, b"gridSpan") {
                     if let Some(top) = table_stack.last_mut() {
@@ -535,12 +562,28 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             }
                         }
                     }
+                } else if qname_eq(name, b"vMerge") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            // Check for w:val="restart" — absent val or val≠"restart" means continuation
+                            let mut is_restart = false;
+                            for attr in e.attributes().flatten() {
+                                if qname_eq(attr.key, b"val") {
+                                    let v = String::from_utf8_lossy(attr.value.as_ref());
+                                    is_restart = v.trim() == "restart";
+                                    break;
+                                }
+                            }
+                            top.cur_cell_is_vmerge_continuation = !is_restart;
+                        }
+                    }
                 } else if qname_eq(name, b"p") {
                     if table_stack.is_empty() {
                         in_paragraph = true;
                         para_text.clear();
                         para_sub_texts.clear();
                         para_is_list = false;
+                        para_list_level = 0;
                         para_has_drawing = false;
                         para_has_page_break = false;
                         para_has_section_break = false;
@@ -550,7 +593,17 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                         para_image_alt = None;
                         para_footnote_refs.clear();
                         para_endnote_refs.clear();
+                        para_num_id = None;
+                        in_hyperlink = false;
+                        hyperlink_rid.clear();
+                        hyperlink_text.clear();
+                        para_hyperlinks.clear();
                         drawing_depth = 0;
+                        in_run = false;
+                        in_rpr = false;
+                        cur_bold = false;
+                        cur_italic = false;
+                        cur_run_text.clear();
                     }
                 } else if qname_eq(name, b"numPr") && in_paragraph {
                     para_is_list = true;
@@ -604,6 +657,44 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             break;
                         }
                     }
+                } else if qname_eq(name, b"ilvl") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u8>() {
+                                para_list_level = v;
+                            }
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"numId") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u32>() {
+                                para_num_id = Some(v);
+                            }
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"hyperlink") && in_paragraph {
+                    in_hyperlink = true;
+                    hyperlink_text.clear();
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"id") {
+                            hyperlink_rid = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"r") && in_paragraph {
+                    in_run = true;
+                    cur_bold = false;
+                    cur_italic = false;
+                    cur_run_text.clear();
+                } else if qname_eq(name, b"rPr") && in_run {
+                    in_rpr = true;
                 } else if qname_eq(name, b"outlineLvl") && in_paragraph {
                     for attr in e.attributes().flatten() {
                         if qname_eq(attr.key, b"val") {
@@ -643,6 +734,21 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     break;
                                 }
                             }
+                        }
+                    }
+                } else if qname_eq(name, b"vMerge") {
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            // Check for w:val="restart" — absent val or val≠"restart" means continuation
+                            let mut is_restart = false;
+                            for attr in e.attributes().flatten() {
+                                if qname_eq(attr.key, b"val") {
+                                    let v = String::from_utf8_lossy(attr.value.as_ref());
+                                    is_restart = v.trim() == "restart";
+                                    break;
+                                }
+                            }
+                            top.cur_cell_is_vmerge_continuation = !is_restart;
                         }
                     }
                 } else if qname_eq(name, b"br") && in_paragraph {
@@ -693,6 +799,26 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             break;
                         }
                     }
+                } else if qname_eq(name, b"ilvl") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u8>() {
+                                para_list_level = v;
+                            }
+                            break;
+                        }
+                    }
+                } else if qname_eq(name, b"numId") && in_paragraph {
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            let raw = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                            if let Ok(v) = raw.trim().parse::<u32>() {
+                                para_num_id = Some(v);
+                            }
+                            break;
+                        }
+                    }
                 } else if qname_eq(name, b"outlineLvl") && in_paragraph {
                     for attr in e.attributes().flatten() {
                         if qname_eq(attr.key, b"val") {
@@ -703,6 +829,28 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             break;
                         }
                     }
+                } else if qname_eq(name, b"b") && in_rpr {
+                    let mut val = String::new();
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            val = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            break;
+                        }
+                    }
+                    cur_bold = val != "false" && val != "0";
+                } else if qname_eq(name, b"i") && in_rpr {
+                    let mut val = String::new();
+                    for attr in e.attributes().flatten() {
+                        if qname_eq(attr.key, b"val") {
+                            val = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            break;
+                        }
+                    }
+                    cur_italic = val != "false" && val != "0";
                 }
             }
             Ok(Event::End(e)) => {
@@ -711,22 +859,66 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                     in_text = false;
                 } else if qname_eq(name, b"drawing") {
                     drawing_depth = drawing_depth.saturating_sub(1);
+                } else if qname_eq(name, b"hyperlink") && in_paragraph {
+                    let anchor = hyperlink_text.trim().to_string();
+                    if !anchor.is_empty() && !hyperlink_rid.is_empty() {
+                        para_hyperlinks.push((anchor, hyperlink_rid.clone()));
+                    }
+                    in_hyperlink = false;
+                    hyperlink_rid.clear();
+                    hyperlink_text.clear();
+                } else if qname_eq(name, b"rPr") {
+                    in_rpr = false;
+                } else if qname_eq(name, b"r") && in_paragraph {
+                    if !cur_run_text.is_empty() {
+                        let formatted = match (cur_bold, cur_italic) {
+                            (true, true) => format!("***{}***", cur_run_text),
+                            (true, false) => format!("**{}**", cur_run_text),
+                            (false, true) => format!("*{}*", cur_run_text),
+                            (false, false) => cur_run_text.clone(),
+                        };
+                        push_text(&mut para_text, &formatted);
+                    }
+                    in_run = false;
+                    in_rpr = false;
+                    cur_bold = false;
+                    cur_italic = false;
+                    cur_run_text.clear();
                 } else if qname_eq(name, b"trPr") {
                     if let Some(top) = table_stack.last_mut() {
                         top.in_tr_pr = false;
                     }
                 } else if qname_eq(name, b"tc") {
                     if let Some(top) = table_stack.last_mut() {
-                        let cell = std::mem::take(&mut top.current_cell).trim().to_string();
+                        let col_index = top.current_row.len();
+                        let raw_cell = std::mem::take(&mut top.current_cell).trim().to_string();
+
+                        let cell = if top.cur_cell_is_vmerge_continuation {
+                            // Repeat content from the cell above this column position.
+                            top.vmerge_col_content
+                                .get(col_index)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            raw_cell.clone()
+                        };
+
                         let span = top.cell_span.max(1);
-                        // Repeat the cell text into every spanned column so the
-                        // rendered markdown stays aligned and group-header context
-                        // is visible in each column position.
-                        for _ in 0..span {
+                        for i in 0..span {
+                            // Update vmerge_col_content for each spanned column
+                            let abs_col = col_index + i;
+                            if !top.cur_cell_is_vmerge_continuation {
+                                if top.vmerge_col_content.len() <= abs_col {
+                                    top.vmerge_col_content.resize(abs_col + 1, String::new());
+                                }
+                                top.vmerge_col_content[abs_col] = raw_cell.clone();
+                            }
                             top.current_row.push(cell.clone());
                         }
+
                         top.in_cell = false;
                         top.cell_span = 1;
+                        top.cur_cell_is_vmerge_continuation = false;
                     }
                 } else if qname_eq(name, b"tr") {
                     if let Some(top) = table_stack.last_mut() {
@@ -760,6 +952,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     text: rendered,
                                     has_drawing: false,
                                     is_list: false,
+                                    list_level: 0,
                                     heading_style: None,
                                     outline_level: None,
                                     page_break: false,
@@ -768,6 +961,8 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     image_alt: None,
                                     footnote_refs: Vec::new(),
                                     endnote_refs: Vec::new(),
+                                    num_id: None,
+                                    hyperlinks: Vec::new(),
                                 });
                             }
                         }
@@ -786,6 +981,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                 text: std::mem::take(&mut para_text),
                                 has_drawing: para_has_drawing,
                                 is_list,
+                                list_level: para_list_level,
                                 heading_style: para_style.take(),
                                 outline_level: para_outline_lvl.take(),
                                 page_break: para_has_page_break,
@@ -794,6 +990,8 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                 image_alt: para_image_alt.take(),
                                 footnote_refs: std::mem::take(&mut para_footnote_refs),
                                 endnote_refs: std::mem::take(&mut para_endnote_refs),
+                                num_id: para_num_id,
+                                hyperlinks: std::mem::take(&mut para_hyperlinks),
                             });
                         } else {
                             // Paragraph had soft line breaks — emit one block per segment.
@@ -810,16 +1008,13 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     // segment; subsequent ones are plain text continuations.
                                     has_drawing: para_has_drawing && i == 0,
                                     is_list,
+                                    list_level: para_list_level,
                                     heading_style: para_style.clone(),
                                     outline_level: para_outline_lvl,
                                     page_break: para_has_page_break && i == 0,
                                     section_break: para_has_section_break && i == 0,
                                     rendered_page_break: para_has_rendered_break && i == 0,
-                                    image_alt: if i == 0 {
-                                        para_image_alt.clone()
-                                    } else {
-                                        None
-                                    },
+                                    image_alt: if i == 0 { para_image_alt.clone() } else { None },
                                     footnote_refs: if i == 0 {
                                         para_footnote_refs.clone()
                                     } else {
@@ -827,6 +1022,12 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     },
                                     endnote_refs: if i == 0 {
                                         para_endnote_refs.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
+                                    num_id: para_num_id,
+                                    hyperlinks: if i == 0 {
+                                        para_hyperlinks.clone()
                                     } else {
                                         Vec::new()
                                     },
@@ -838,15 +1039,26 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             para_image_alt = None;
                             para_footnote_refs.clear();
                             para_endnote_refs.clear();
+                            para_hyperlinks.clear();
                         }
 
                         in_paragraph = false;
                         para_is_list = false;
+                        para_list_level = 0;
+                        para_num_id = None;
+                        in_hyperlink = false;
+                        hyperlink_rid.clear();
+                        hyperlink_text.clear();
                         para_has_drawing = false;
                         para_has_page_break = false;
                         para_has_section_break = false;
                         para_has_rendered_break = false;
                         drawing_depth = 0;
+                        in_run = false;
+                        in_rpr = false;
+                        cur_bold = false;
+                        cur_italic = false;
+                        cur_run_text.clear();
                     } else if let Some(top) = table_stack.last_mut() {
                         // Separate paragraphs within a table cell with a
                         // single space so multi-paragraph cells stay legible.
@@ -870,7 +1082,17 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             push_text(&mut top.current_cell, &txt);
                         }
                     } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
+                        if in_run {
+                            push_text(&mut cur_run_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        } else {
+                            push_text(&mut para_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        }
                     }
                 }
             }
@@ -882,7 +1104,17 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                             push_text(&mut top.current_cell, &txt);
                         }
                     } else if in_paragraph {
-                        push_text(&mut para_text, &txt);
+                        if in_run {
+                            push_text(&mut cur_run_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        } else {
+                            push_text(&mut para_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        }
                     }
                 }
             }

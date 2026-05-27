@@ -7,6 +7,7 @@ use pyo3::types::PyModule;
 fn _rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register each extension independently so new formats (e.g. PDF) stay isolated.
     extensions::docx::register(m)?;
+    extensions::doc::register(m)?;
     extensions::csv::register(m)?;
     extensions::html::register(m)?;
     extensions::md::register(m)?;

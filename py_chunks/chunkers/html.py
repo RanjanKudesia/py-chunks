@@ -103,3 +103,13 @@ def stream_chunk_html(
     return _rust.stream_html_chunks(
         str(path), mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page,
     )
+
+
+def html_to_markdown(file_path: str) -> str:
+    """Convert an HTML file to a Markdown string."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"HTML file not found: {file_path}")
+    if path.suffix.lower() not in (".html", ".htm"):
+        raise ValueError(f"Expected a .html or .htm file, got: {file_path}")
+    return _rust.html_to_markdown(str(path))
