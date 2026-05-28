@@ -190,3 +190,14 @@ def docx_to_markdown(file_path: str) -> str:
     if path.suffix.lower() != ".docx":
         raise ValueError(f"Expected a .docx file, got: {file_path}")
     return _rust.docx_to_markdown(str(path))
+
+
+def docx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert a DOCX file to Markdown and extract embedded images."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+    if path.suffix.lower() != ".docx":
+        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    md, image_list = _rust.docx_to_markdown_with_images(str(path))
+    return md, dict(image_list)

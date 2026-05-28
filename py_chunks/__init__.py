@@ -8,9 +8,10 @@ URLs.
 import os
 import sys
 import tempfile
+from dataclasses import dataclass, field
 from os import PathLike, fspath
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
@@ -39,15 +40,23 @@ if _pdfium_bin.exists():
 if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
     os.add_dll_directory(str(_pkg_dir))
 
-from .chunkers.docx import chunk_docx, docx_to_markdown as _docx_to_markdown, stream_chunk_docx
+from .chunkers.docx import chunk_docx, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
 from .chunkers.doc import chunk_doc, doc_to_markdown as _doc_to_markdown, stream_chunk_doc
 from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
 from .chunkers.html import chunk_html, stream_chunk_html, html_to_markdown as _html_to_markdown
 from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
 from .chunkers.pdf import chunk_pdf, pdf_to_markdown as _pdf_to_markdown, stream_chunk_pdf
-from .chunkers.pptx import chunk_pptx, pptx_to_markdown as _pptx_to_markdown, stream_chunk_pptx
+from .chunkers.pptx import chunk_pptx, pptx_to_markdown as _pptx_to_markdown, pptx_to_markdown_with_images as _pptx_to_markdown_with_images, stream_chunk_pptx
 from .chunkers.txt import chunk_txt, stream_chunk_txt, txt_to_markdown as _txt_to_markdown
 from .chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx, xlsx_to_markdown as _xlsx_to_markdown
+
+
+@dataclass
+class MarkdownResult:
+    """Return type of get_markdown() when list_images=True."""
+
+    markdown: str
+    images: dict[str, bytes] = field(default_factory=dict)
 
 
 _DISPATCH = {
@@ -78,6 +87,11 @@ _MD_DISPATCH = {
     ".csv":  _csv_to_markdown,
 }
 
+_MD_IMAGE_DISPATCH: dict[str, Any] = {
+    ".docx": _docx_to_markdown_with_images,
+    ".pptx": _pptx_to_markdown_with_images,
+}
+
 
 def _resolve_markdown_dispatch_ext(ext: str) -> str:
     if ext not in _MD_DISPATCH:
@@ -88,12 +102,18 @@ def _resolve_markdown_dispatch_ext(ext: str) -> str:
     return ext
 
 
-def _get_markdown_from_temp_data(data: bytes, ext: str) -> str:
+def _get_markdown_from_temp_data(data: bytes, ext: str, list_images: bool = False):
     with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
     try:
-        return _MD_DISPATCH[ext](tmp_path)
+        if list_images and ext in _MD_IMAGE_DISPATCH:
+            md, images = _MD_IMAGE_DISPATCH[ext](tmp_path)
+            return MarkdownResult(markdown=md, images=images)
+        md = _MD_DISPATCH[ext](tmp_path)
+        if list_images:
+            return MarkdownResult(markdown=md, images={})
+        return md
     finally:
         os.unlink(tmp_path)
 
@@ -1058,15 +1078,28 @@ def get_chunks(
     )
 
 
+@overload
+def get_markdown(source, *, filename: str | None = ..., list_images: Literal[False] = ...) -> str: ...
+
+
+@overload
+def get_markdown(source, *, filename: str | None = ..., list_images: Literal[True]) -> MarkdownResult: ...
+
+
 def get_markdown(
     source,
     *,
     filename: str | None = None,
-) -> str:
+    list_images: bool = False,
+) -> "str | MarkdownResult":
     """Convert a document to a Markdown string.
 
     Accepts the same source types as get_chunks(): file path, bytes,
     bytearray, memoryview, or file-like object.
+
+    Args:
+        list_images: If True, return a MarkdownResult with extracted image bytes.
+                     If False (default), return a plain str (existing behaviour).
     """
     # Resolve to a file path (reuse the same temp-file pattern as get_chunks)
     if isinstance(source, (str, Path)):
@@ -1074,14 +1107,20 @@ def get_markdown(
         if not path.is_file():
             raise FileNotFoundError(f"File not found: {source}")
         ext = _resolve_markdown_dispatch_ext(path.suffix.lower())
-        return _MD_DISPATCH[ext](str(path))
+        if list_images and ext in _MD_IMAGE_DISPATCH:
+            md, images = _MD_IMAGE_DISPATCH[ext](str(path))
+            return MarkdownResult(markdown=md, images=images)
+        md = _MD_DISPATCH[ext](str(path))
+        if list_images:
+            return MarkdownResult(markdown=md, images={})
+        return md
 
     # bytes / bytearray / memoryview
     if isinstance(source, (bytes, bytearray, memoryview)):
         if not filename:
             raise ValueError("filename is required when source is bytes")
         ext = _resolve_markdown_dispatch_ext(Path(filename).suffix.lower())
-        return _get_markdown_from_temp_data(bytes(source), ext)
+        return _get_markdown_from_temp_data(bytes(source), ext, list_images)
 
     # File-like object
     if hasattr(source, "read"):
@@ -1093,12 +1132,14 @@ def get_markdown(
         return _get_markdown_from_temp_data(
             data if isinstance(data, bytes) else data.encode(),
             ext,
+            list_images,
         )
 
     raise TypeError(f"Unsupported source type: {type(source).__name__}")
 
 
 __all__ = [
+    "MarkdownResult",
     "get_chunks_from_path",
     "get_chunks_from_fileobj",
     "get_chunks_from_upload",

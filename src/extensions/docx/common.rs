@@ -175,6 +175,8 @@ pub(super) struct DocxBlock {
     /// `pic:cNvPr/@name`. `None` when the paragraph contains no
     /// `<w:drawing>` or the drawing exposes no usable description.
     pub image_alt: Option<String>,
+    /// Relationship id from `<a:blip r:embed="rIdN"/>` for inline images.
+    pub image_rid: Option<String>,
     /// IDs of footnotes referenced by `<w:footnoteReference>` inside this
     /// paragraph, in document order. Resolved against `word/footnotes.xml`
     /// at the structural / chunking layer so anchored footnote text lands
@@ -447,6 +449,21 @@ fn harvest_note_id(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
     None
 }
 
+/// Pull the `r:embed` value from `<a:blip>`.
+fn harvest_blip_embed(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
+    for attr in e.attributes().flatten() {
+        if qname_eq(attr.key, b"embed") {
+            let value = String::from_utf8_lossy(attr.value.as_ref())
+                .trim()
+                .to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 /// Render the placeholder string used in place of an image-only paragraph's
 /// body. Includes the harvested alt text when available so downstream
 /// consumers (embedders, search) get a real semantic signal instead of an
@@ -494,6 +511,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
     let mut para_style: Option<String> = None;
     let mut para_outline_lvl: Option<u32> = None;
     let mut para_image_alt: Option<String> = None;
+    let mut para_image_rid: Option<String> = None;
     let mut para_footnote_refs: Vec<String> = Vec::new();
     let mut para_endnote_refs: Vec<String> = Vec::new();
     let mut para_num_id: Option<u32> = None;
@@ -591,6 +609,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                         para_style = None;
                         para_outline_lvl = None;
                         para_image_alt = None;
+                        para_image_rid = None;
                         para_footnote_refs.clear();
                         para_endnote_refs.clear();
                         para_num_id = None;
@@ -641,6 +660,12 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                     && para_image_alt.is_none()
                 {
                     para_image_alt = harvest_image_alt(&e);
+                } else if qname_eq(name, b"blip")
+                    && in_paragraph
+                    && drawing_depth > 0
+                    && para_image_rid.is_none()
+                {
+                    para_image_rid = harvest_blip_embed(&e);
                 } else if qname_eq(name, b"footnoteReference") && in_paragraph {
                     if let Some(id) = harvest_note_id(&e) {
                         para_footnote_refs.push(id);
@@ -783,6 +808,12 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                     && para_image_alt.is_none()
                 {
                     para_image_alt = harvest_image_alt(&e);
+                } else if qname_eq(name, b"blip")
+                    && in_paragraph
+                    && drawing_depth > 0
+                    && para_image_rid.is_none()
+                {
+                    para_image_rid = harvest_blip_embed(&e);
                 } else if qname_eq(name, b"footnoteReference") && in_paragraph {
                     if let Some(id) = harvest_note_id(&e) {
                         para_footnote_refs.push(id);
@@ -959,6 +990,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     section_break: false,
                                     rendered_page_break: false,
                                     image_alt: None,
+                                    image_rid: None,
                                     footnote_refs: Vec::new(),
                                     endnote_refs: Vec::new(),
                                     num_id: None,
@@ -988,6 +1020,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                 section_break: para_has_section_break,
                                 rendered_page_break: para_has_rendered_break,
                                 image_alt: para_image_alt.take(),
+                                image_rid: para_image_rid.take(),
                                 footnote_refs: std::mem::take(&mut para_footnote_refs),
                                 endnote_refs: std::mem::take(&mut para_endnote_refs),
                                 num_id: para_num_id,
@@ -1015,6 +1048,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                                     section_break: para_has_section_break && i == 0,
                                     rendered_page_break: para_has_rendered_break && i == 0,
                                     image_alt: if i == 0 { para_image_alt.clone() } else { None },
+                                    image_rid: if i == 0 { para_image_rid.clone() } else { None },
                                     footnote_refs: if i == 0 {
                                         para_footnote_refs.clone()
                                     } else {
@@ -1053,6 +1087,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                         para_has_page_break = false;
                         para_has_section_break = false;
                         para_has_rendered_break = false;
+                        para_image_rid = None;
                         drawing_depth = 0;
                         in_run = false;
                         in_rpr = false;

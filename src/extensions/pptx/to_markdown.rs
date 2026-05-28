@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Cursor;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Cursor, Read};
 
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyBytes, PyModule};
 use pyo3::wrap_pyfunction;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
@@ -33,6 +34,8 @@ struct SlideBlock {
     table_rows: Vec<Vec<String>>,
     /// Whether to render the first row as a header separator (for Table).
     table_has_header: bool,
+    /// Relationship id from `<a:blip r:embed="rIdN"/>` for image blocks.
+    image_rid: Option<String>,
 }
 
 impl SlideBlock {
@@ -44,6 +47,7 @@ impl SlideBlock {
             is_numbered: false,
             table_rows: Vec::new(),
             table_has_header: false,
+            image_rid: None,
         }
     }
 
@@ -55,6 +59,7 @@ impl SlideBlock {
             is_numbered,
             table_rows: Vec::new(),
             table_has_header: false,
+            image_rid: None,
         }
     }
 
@@ -66,10 +71,11 @@ impl SlideBlock {
             is_numbered: false,
             table_rows: rows,
             table_has_header: has_header,
+            image_rid: None,
         }
     }
 
-    fn image(alt: Option<String>) -> Self {
+    fn image(alt: Option<String>, rid: Option<String>) -> Self {
         let text = match alt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(a) => format!("[Image: {a}]"),
             None => "[Image]".to_string(),
@@ -81,6 +87,7 @@ impl SlideBlock {
             is_numbered: false,
             table_rows: Vec::new(),
             table_has_header: false,
+            image_rid: rid,
         }
     }
 }
@@ -121,6 +128,7 @@ fn parse_slide_for_markdown(
     let mut sp_ph_checked = false;
     let mut in_pic = false;
     let mut pic_alt: Option<String> = None;
+    let mut pic_rid: Option<String> = None;
 
     // Text body / paragraph tracking (inside sp)
     let mut in_txbody = false;
@@ -278,6 +286,7 @@ fn parse_slide_for_markdown(
                     b"pic" => {
                         in_pic = true;
                         pic_alt = None;
+                        pic_rid = None;
                     }
                     b"cNvPr" if in_pic => {
                         let mut descr: Option<String> = None;
@@ -306,6 +315,20 @@ fn parse_slide_for_markdown(
                                 || lower.starts_with("chart ");
                             if !generic {
                                 pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let key_local = attr_local_name(attr.key.as_ref());
+                            if key_local == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
                             }
                         }
                     }
@@ -419,7 +442,7 @@ fn parse_slide_for_markdown(
                     }
                     b"pic" => {
                         in_pic = false;
-                        slide.blocks.push(SlideBlock::image(None));
+                        slide.blocks.push(SlideBlock::image(None, None));
                     }
                     b"cNvPr" if in_pic => {
                         let mut descr: Option<String> = None;
@@ -448,6 +471,20 @@ fn parse_slide_for_markdown(
                                 || lower.starts_with("chart ");
                             if !generic {
                                 pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let key_local = attr_local_name(attr.key.as_ref());
+                            if key_local == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
                             }
                         }
                     }
@@ -584,7 +621,9 @@ fn parse_slide_for_markdown(
                     }
                     b"pic" if in_pic => {
                         in_pic = false;
-                        slide.blocks.push(SlideBlock::image(pic_alt.take()));
+                        slide
+                            .blocks
+                            .push(SlideBlock::image(pic_alt.take(), pic_rid.take()));
                     }
                     b"p" if in_tc_para => {
                         in_tc_para = false;
@@ -689,9 +728,16 @@ fn parse_slide_rels(
     archive: &mut ZipArchive<Cursor<Vec<u8>>>,
     slide_name: &str,
 ) -> HashMap<String, String> {
+    parse_slide_rels_with_images(archive, slide_name).0
+}
+
+fn parse_slide_rels_with_images(
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    slide_name: &str,
+) -> (HashMap<String, String>, HashMap<String, String>) {
     let last_slash = match slide_name.rfind('/') {
         Some(i) => i,
-        None => return HashMap::new(),
+        None => return (HashMap::new(), HashMap::new()),
     };
     let dir = &slide_name[..last_slash];
     let file = &slide_name[last_slash + 1..];
@@ -699,14 +745,15 @@ fn parse_slide_rels(
 
     let rels_bytes = match read_zip_entry(archive, &rels_path) {
         Ok(b) => b,
-        Err(_) => return HashMap::new(),
+        Err(_) => return (HashMap::new(), HashMap::new()),
     };
     let xml = match std::str::from_utf8(&rels_bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => return HashMap::new(),
+        Err(_) => return (HashMap::new(), HashMap::new()),
     };
 
-    let mut result = HashMap::new();
+    let mut hyperlinks = HashMap::new();
+    let mut images = HashMap::new();
     let mut reader = XmlReader::from_str(&xml);
     let mut buf = Vec::new();
 
@@ -737,7 +784,10 @@ fn parse_slide_rels(
                         && !id.is_empty()
                         && !target.is_empty()
                     {
-                        result.insert(id, target);
+                        hyperlinks.insert(id, target);
+                    } else if rel_type.ends_with("/image") && !id.is_empty() && !target.is_empty() {
+                        let path = resolve_relative_path(dir, &target);
+                        images.insert(id, path);
                     }
                 }
             }
@@ -746,7 +796,27 @@ fn parse_slide_rels(
         }
         buf.clear();
     }
-    result
+    (hyperlinks, images)
+}
+
+fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
+    let path = zip_path.to_ascii_lowercase();
+    let ext = if path.ends_with(".png") {
+        ".png"
+    } else if path.ends_with(".jpg") {
+        ".jpg"
+    } else if path.ends_with(".jpeg") {
+        ".jpeg"
+    } else if path.ends_with(".gif") {
+        ".gif"
+    } else if path.ends_with(".webp") {
+        ".webp"
+    } else {
+        return None;
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}{ext}", hasher.finish()))
 }
 
 fn resolve_relative_path(base_dir: &str, relative: &str) -> String {
@@ -917,6 +987,106 @@ fn slide_to_markdown(slide_num: usize, slide: &SlideMarkdownContent) -> String {
     out.trim_end().to_string()
 }
 
+fn slide_to_markdown_with_images(
+    slide_num: usize,
+    slide: &SlideMarkdownContent,
+    image_rids: &HashMap<String, String>,
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> String {
+    let mut out = String::new();
+
+    match &slide.title {
+        Some(t) => out.push_str(&format!("## Slide {}: {}\n\n", slide_num, t.trim())),
+        None => out.push_str(&format!("## Slide {}\n\n", slide_num)),
+    }
+
+    let mut num_counters: HashMap<u8, usize> = HashMap::new();
+    let mut prev_was_list = false;
+
+    for block in &slide.blocks {
+        match block.kind {
+            BlockKind::Paragraph => {
+                if prev_was_list {
+                    out.push('\n');
+                }
+                num_counters.clear();
+                if !block.text.trim().is_empty() {
+                    out.push_str(block.text.trim());
+                    out.push_str("\n\n");
+                }
+                prev_was_list = false;
+            }
+            BlockKind::ListItem => {
+                let indent = "  ".repeat(block.level as usize);
+                if block.is_numbered {
+                    let counter = num_counters.entry(block.level).or_insert(0);
+                    *counter += 1;
+                    out.push_str(&format!("{}{}. {}\n", indent, counter, block.text));
+                } else {
+                    num_counters.remove(&block.level);
+                    out.push_str(&format!("{}- {}\n", indent, block.text));
+                }
+                prev_was_list = true;
+            }
+            BlockKind::Table => {
+                if prev_was_list {
+                    out.push('\n');
+                }
+                num_counters.clear();
+                let rendered = render_table_md(&block.table_rows, block.table_has_header);
+                if !rendered.is_empty() {
+                    out.push_str(&rendered);
+                    out.push_str("\n\n");
+                }
+                prev_was_list = false;
+            }
+            BlockKind::Image => {
+                if prev_was_list {
+                    out.push('\n');
+                }
+                num_counters.clear();
+
+                let mut emitted = false;
+                if let Some(rid) = block.image_rid.as_deref() {
+                    if let Some(zip_path) = image_rids.get(rid) {
+                        if let Ok(mut entry) = archive.by_name(zip_path) {
+                            let mut bytes = Vec::new();
+                            if entry.read_to_end(&mut bytes).is_ok() {
+                                if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                                    if !image_out.iter().any(|(name, _)| name == &hash_name) {
+                                        image_out.push((hash_name.clone(), bytes));
+                                    }
+                                    out.push_str(&format!("![]({})\n\n", hash_name));
+                                    emitted = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !emitted {
+                    out.push_str(&block.text);
+                    out.push_str("\n\n");
+                }
+                prev_was_list = false;
+            }
+        }
+    }
+
+    if let Some(ref notes) = slide.notes {
+        let n = notes.trim();
+        if !n.is_empty() {
+            if prev_was_list {
+                out.push('\n');
+            }
+            out.push_str(&format!("> **Notes:** {}\n\n", n.replace('\n', " ")));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
 fn presentation_to_markdown(
     pres_title: Option<String>,
     slides: Vec<(usize, SlideMarkdownContent)>,
@@ -983,7 +1153,79 @@ pub fn pptx_to_markdown(file_path: &str) -> PyResult<String> {
     Ok(presentation_to_markdown(pres_title, slides, sections))
 }
 
+#[pyfunction]
+pub fn pptx_to_markdown_with_images(py: Python<'_>, file_path: &str) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .pptx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read PPTX file: {e}")))?;
+
+    let mut archive = open_pptx(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid PPTX zip: {e}")))?;
+
+    let pres_title = extract_presentation_title(&mut archive);
+    let sections = parse_presentation_sections(&mut archive).unwrap_or_default();
+    let slide_names = collect_slide_names(&archive);
+
+    let mut slides: Vec<(usize, SlideMarkdownContent)> = Vec::new();
+    let mut slide_image_rids: HashMap<usize, HashMap<String, String>> = HashMap::new();
+
+    for (slide_num, slide_name) in &slide_names {
+        let xml_bytes =
+            read_zip_entry(&mut archive, slide_name).map_err(PyRuntimeError::new_err)?;
+        let (slide_rels, image_rids) = parse_slide_rels_with_images(&mut archive, slide_name);
+        let mut slide =
+            parse_slide_for_markdown(&xml_bytes, &slide_rels).map_err(PyRuntimeError::new_err)?;
+        slide.notes = extract_notes_text(&mut archive, slide_name);
+        slides.push((*slide_num, slide));
+        slide_image_rids.insert(*slide_num, image_rids);
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(ref t) = pres_title {
+        if !t.trim().is_empty() {
+            parts.push(format!("# {}", t.trim()));
+        }
+    }
+
+    let mut section_starts: HashMap<usize, String> = HashMap::new();
+    for (section_name, slide_nums) in &sections {
+        if let Some(&first) = slide_nums.first() {
+            section_starts.insert(first, section_name.clone());
+        }
+    }
+
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    for (slide_num, slide) in &slides {
+        if let Some(section_name) = section_starts.get(slide_num) {
+            parts.push(format!("# {}", section_name.trim()));
+        }
+        let image_rids = slide_image_rids.get(slide_num).cloned().unwrap_or_default();
+        let slide_md = slide_to_markdown_with_images(
+            *slide_num,
+            slide,
+            &image_rids,
+            &mut archive,
+            &mut image_out,
+        );
+        if !slide_md.trim().is_empty() {
+            parts.push(slide_md);
+        }
+    }
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+    Ok((parts.join("\n\n---\n\n").trim().to_string(), image_out_py))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pptx_to_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(pptx_to_markdown_with_images, m)?)?;
     Ok(())
 }

@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
-use std::io::Cursor;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{Cursor, Read};
 
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyBytes, PyModule};
 use pyo3::wrap_pyfunction;
 use quick_xml::events::Event as XmlEvent;
 use quick_xml::Reader as XmlReader;
@@ -238,6 +239,74 @@ fn parse_rels_xml(xml: &str) -> (HashMap<String, String>, Vec<String>) {
     (hyperlinks, header_paths)
 }
 
+fn parse_rels_xml_images(xml: &str) -> HashMap<String, String> {
+    let mut images = HashMap::new();
+    let mut reader = XmlReader::from_str(xml);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(XmlEvent::Empty(ref e)) | Ok(XmlEvent::Start(ref e)) => {
+                let ename = e.name();
+                let ebytes = ename.as_ref();
+                let local: &[u8] = ebytes.rsplit(|b| *b == b':').next().unwrap_or(ebytes);
+                if local == b"Relationship" {
+                    let mut id = String::new();
+                    let mut target = String::new();
+                    let mut rel_type = String::new();
+
+                    for attr in e.attributes().flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        let val = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                        match key.as_str() {
+                            "Id" => id = val,
+                            "Target" => target = val,
+                            "Type" => rel_type = val,
+                            _ => {}
+                        }
+                    }
+
+                    if rel_type.ends_with("/image") && !id.is_empty() && !target.is_empty() {
+                        let normalized = if let Some(stripped) = target.strip_prefix("../") {
+                            format!("word/{stripped}")
+                        } else if target.starts_with("word/") {
+                            target
+                        } else {
+                            format!("word/{target}")
+                        };
+                        images.insert(id, normalized);
+                    }
+                }
+            }
+            Ok(XmlEvent::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    images
+}
+
+fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
+    let path = zip_path.to_ascii_lowercase();
+    let ext = if path.ends_with(".png") {
+        ".png"
+    } else if path.ends_with(".jpg") {
+        ".jpg"
+    } else if path.ends_with(".jpeg") {
+        ".jpeg"
+    } else if path.ends_with(".gif") {
+        ".gif"
+    } else if path.ends_with(".webp") {
+        ".webp"
+    } else {
+        return None;
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}{ext}", hasher.finish()))
+}
+
 /// Extract plain text from a DOCX header/footer XML file.
 /// Concatenates all <w:t> text nodes, separated by spaces.
 fn extract_header_text(xml: &str) -> String {
@@ -446,6 +515,183 @@ fn blocks_to_markdown(
     result.trim_end().to_string()
 }
 
+fn blocks_to_markdown_with_images(
+    blocks: &[DocxBlock],
+    footnote_map: &HashMap<String, String>,
+    endnote_map: &HashMap<String, String>,
+    num_id_map: &HashMap<u32, bool>,
+    rels_map: &HashMap<String, String>,
+    image_rids_map: &HashMap<String, String>,
+    archive: &mut ZipArchive<Cursor<&[u8]>>,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> String {
+    let mut out = String::new();
+    let mut footnote_queue: Vec<(String, String)> = Vec::new();
+    let mut list_counters: HashMap<(u32, u8), usize> = HashMap::new();
+    let mut prev_was_list = false;
+
+    for block in blocks {
+        match block.kind {
+            DocxBlockKind::Table => {
+                if !block.text.trim().is_empty() {
+                    if prev_was_list {
+                        out.push('\n');
+                    }
+                    out.push('\n');
+                    out.push_str(block.text.trim());
+                    out.push_str("\n\n");
+                }
+                list_counters.clear();
+                prev_was_list = false;
+            }
+            DocxBlockKind::Paragraph => {
+                let raw = block.text.trim();
+
+                if raw.is_empty() && !block.has_drawing {
+                    continue;
+                }
+
+                for id in &block.footnote_refs {
+                    if let Some(t) = footnote_map.get(id) {
+                        footnote_queue.push((id.clone(), t.clone()));
+                    }
+                }
+                for id in &block.endnote_refs {
+                    if let Some(t) = endnote_map.get(id) {
+                        footnote_queue.push((id.clone(), t.clone()));
+                    }
+                }
+
+                let text = if !block.hyperlinks.is_empty() {
+                    let mut t = raw.to_string();
+                    for (anchor, rid) in &block.hyperlinks {
+                        if let Some(url) = rels_map.get(rid) {
+                            let a = anchor.trim();
+                            if !a.is_empty() {
+                                t = t.replacen(a, &format!("[{}]({})", a, url), 1);
+                            }
+                        }
+                    }
+                    t
+                } else {
+                    raw.to_string()
+                };
+
+                let heading_level =
+                    docx_heading_level(block.heading_style.as_deref(), block.outline_level);
+
+                if let Some(level) = heading_level {
+                    if prev_was_list {
+                        out.push('\n');
+                    }
+                    list_counters.clear();
+                    let hashes = "#".repeat((level as usize).min(6));
+                    out.push_str(&format!("{} {}\n\n", hashes, text));
+                    prev_was_list = false;
+                } else if block.has_drawing {
+                    if prev_was_list {
+                        out.push('\n');
+                    }
+                    list_counters.clear();
+
+                    let mut emitted = false;
+                    if let Some(rid) = block.image_rid.as_deref() {
+                        if let Some(zip_path) = image_rids_map.get(rid) {
+                            if let Ok(mut entry) = archive.by_name(zip_path) {
+                                let mut bytes = Vec::new();
+                                if entry.read_to_end(&mut bytes).is_ok() {
+                                    if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                                        if !image_out.iter().any(|(name, _)| name == &hash_name) {
+                                            image_out.push((hash_name.clone(), bytes));
+                                        }
+                                        out.push_str(&format!("![]({})\n\n", hash_name));
+                                        emitted = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if !emitted {
+                        let placeholder = image_placeholder(block.image_alt.as_deref());
+                        out.push_str(&format!("{}\n\n", placeholder));
+                    }
+                    prev_was_list = false;
+                } else if block.is_list {
+                    let indent = "  ".repeat(block.list_level as usize);
+                    let is_ordered = block
+                        .num_id
+                        .and_then(|id| num_id_map.get(&id))
+                        .copied()
+                        .unwrap_or_else(|| {
+                            let s = block
+                                .heading_style
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_ascii_lowercase();
+                            s.contains("number") && !s.contains("unnumber")
+                        });
+
+                    if is_ordered {
+                        let key = (block.num_id.unwrap_or(0), block.list_level);
+                        let counter = list_counters.entry(key).or_insert(0);
+                        *counter += 1;
+                        out.push_str(&format!("{}{}. {}\n", indent, counter, text));
+                    } else {
+                        out.push_str(&format!("{}- {}\n", indent, text));
+                    }
+                    prev_was_list = true;
+                } else {
+                    if prev_was_list {
+                        out.push('\n');
+                    }
+                    list_counters.clear();
+                    let style_lc = block
+                        .heading_style
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if style_lc.contains("code") || text.contains("```") {
+                        out.push_str(&format!("```\n{}\n```\n\n", text));
+                    } else {
+                        if block.page_break || block.section_break {
+                            out.push_str("---\n\n");
+                        }
+                        out.push_str(&text);
+                        out.push_str("\n\n");
+                    }
+                    prev_was_list = false;
+                }
+            }
+        }
+    }
+
+    if !footnote_queue.is_empty() {
+        out.push_str("---\n\n");
+        for (id, text) in &footnote_queue {
+            out.push_str(&format!("[^{}]: {}\n", id, text));
+        }
+        out.push('\n');
+    }
+
+    let mut result = String::with_capacity(out.len());
+    let mut blank_count = 0u32;
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 1 {
+                result.push('\n');
+            }
+        } else {
+            blank_count = 0;
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    result.trim_end().to_string()
+}
+
 // ── PyO3 entry point ──────────────────────────────────────────────────────────
 
 #[pyfunction]
@@ -515,7 +761,93 @@ pub fn docx_to_markdown(file_path: &str) -> PyResult<String> {
     Ok(result)
 }
 
+#[pyfunction]
+pub fn docx_to_markdown_with_images(py: Python<'_>, file_path: &str) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let blocks = parse_docx_blocks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+
+    let cursor = Cursor::new(bytes.as_slice());
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid DOCX zip: {e}")))?;
+
+    let footnotes_xml = read_zip_entry(&mut archive, "word/footnotes.xml", MAX_AUX_XML_BYTES)
+        .map_err(PyRuntimeError::new_err)?;
+    let endnotes_xml = read_zip_entry(&mut archive, "word/endnotes.xml", MAX_AUX_XML_BYTES)
+        .map_err(PyRuntimeError::new_err)?;
+    let numbering_xml = read_zip_entry(&mut archive, "word/numbering.xml", MAX_AUX_XML_BYTES)
+        .map_err(PyRuntimeError::new_err)?;
+    let rels_xml = read_zip_entry(
+        &mut archive,
+        "word/_rels/document.xml.rels",
+        MAX_AUX_XML_BYTES,
+    )
+    .map_err(PyRuntimeError::new_err)?;
+
+    let footnote_map = footnotes_xml
+        .as_deref()
+        .map(|x| extract_notes_map(x, "footnote"))
+        .unwrap_or_default();
+    let endnote_map = endnotes_xml
+        .as_deref()
+        .map(|x| extract_notes_map(x, "endnote"))
+        .unwrap_or_default();
+    let num_id_map = numbering_xml
+        .as_deref()
+        .map(parse_numbering_xml)
+        .unwrap_or_default();
+    let (rels_map, header_paths) = rels_xml.as_deref().map(parse_rels_xml).unwrap_or_default();
+    let image_rids_map = rels_xml
+        .as_deref()
+        .map(parse_rels_xml_images)
+        .unwrap_or_default();
+
+    let header_text: String = {
+        let mut parts: Vec<String> = Vec::new();
+        for path in &header_paths {
+            if let Ok(Some(xml)) = read_zip_entry(&mut archive, path, MAX_AUX_XML_BYTES) {
+                let t = extract_header_text(&xml);
+                if !t.is_empty() && !parts.contains(&t) {
+                    parts.push(t);
+                }
+            }
+        }
+        parts.join(" | ")
+    };
+
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let body = blocks_to_markdown_with_images(
+        &blocks,
+        &footnote_map,
+        &endnote_map,
+        &num_id_map,
+        &rels_map,
+        &image_rids_map,
+        &mut archive,
+        &mut image_out,
+    );
+    let result = if header_text.is_empty() {
+        body
+    } else {
+        format!("> {}\n\n{}", header_text, body)
+    };
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+    Ok((result, image_out_py))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(docx_to_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(docx_to_markdown_with_images, m)?)?;
     Ok(())
 }
