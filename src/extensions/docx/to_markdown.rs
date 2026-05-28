@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Cursor, Read};
 
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
@@ -12,7 +11,8 @@ use quick_xml::Reader as XmlReader;
 use zip::ZipArchive;
 
 use super::common::{
-    docx_heading_level, image_placeholder, parse_docx_blocks, DocxBlock, DocxBlockKind,
+    docx_heading_level, image_hash_name, image_placeholder, parse_docx_blocks,
+    parse_rels_xml_images, DocxBlock, DocxBlockKind,
 };
 use super::structural::{extract_notes_map, read_zip_entry};
 
@@ -237,74 +237,6 @@ fn parse_rels_xml(xml: &str) -> (HashMap<String, String>, Vec<String>) {
 
     header_paths.sort();
     (hyperlinks, header_paths)
-}
-
-fn parse_rels_xml_images(xml: &str) -> HashMap<String, String> {
-    let mut images = HashMap::new();
-    let mut reader = XmlReader::from_str(xml);
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(XmlEvent::Empty(ref e)) | Ok(XmlEvent::Start(ref e)) => {
-                let ename = e.name();
-                let ebytes = ename.as_ref();
-                let local: &[u8] = ebytes.rsplit(|b| *b == b':').next().unwrap_or(ebytes);
-                if local == b"Relationship" {
-                    let mut id = String::new();
-                    let mut target = String::new();
-                    let mut rel_type = String::new();
-
-                    for attr in e.attributes().flatten() {
-                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-                        let val = String::from_utf8_lossy(attr.value.as_ref()).to_string();
-                        match key.as_str() {
-                            "Id" => id = val,
-                            "Target" => target = val,
-                            "Type" => rel_type = val,
-                            _ => {}
-                        }
-                    }
-
-                    if rel_type.ends_with("/image") && !id.is_empty() && !target.is_empty() {
-                        let normalized = if let Some(stripped) = target.strip_prefix("../") {
-                            format!("word/{stripped}")
-                        } else if target.starts_with("word/") {
-                            target
-                        } else {
-                            format!("word/{target}")
-                        };
-                        images.insert(id, normalized);
-                    }
-                }
-            }
-            Ok(XmlEvent::Eof) | Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    images
-}
-
-fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
-    let path = zip_path.to_ascii_lowercase();
-    let ext = if path.ends_with(".png") {
-        ".png"
-    } else if path.ends_with(".jpg") {
-        ".jpg"
-    } else if path.ends_with(".jpeg") {
-        ".jpeg"
-    } else if path.ends_with(".gif") {
-        ".gif"
-    } else if path.ends_with(".webp") {
-        ".webp"
-    } else {
-        return None;
-    };
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    Some(format!("{:016x}{ext}", hasher.finish()))
 }
 
 /// Extract plain text from a DOCX header/footer XML file.
@@ -762,7 +694,10 @@ pub fn docx_to_markdown(file_path: &str) -> PyResult<String> {
 }
 
 #[pyfunction]
-pub fn docx_to_markdown_with_images(py: Python<'_>, file_path: &str) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+pub fn docx_to_markdown_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
     if !file_path.to_ascii_lowercase().ends_with(".docx") {
         return Err(PyValueError::new_err(format!(
             "Expected .docx file path, got: {file_path}"

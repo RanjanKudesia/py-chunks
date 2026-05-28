@@ -1,4 +1,5 @@
 pub mod common;
+pub mod images;
 pub mod page_aware;
 pub mod section;
 pub mod semantic;
@@ -7,6 +8,7 @@ pub mod sliding_window;
 pub mod stream_iter;
 pub mod structural;
 pub mod to_markdown;
+pub mod with_images;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     structural::register(m)?;
@@ -17,5 +19,6 @@ pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyRe
     page_aware::register(m)?;
     stream_iter::register(m)?;
     to_markdown::register(m)?;
+    with_images::register(m)?;
     Ok(())
 }

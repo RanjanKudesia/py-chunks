@@ -1,13 +1,19 @@
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 use serde_json::{json, Value};
 
-use super::common::{image_placeholder, parse_docx_blocks, DocxBlock, DocxBlockKind};
+use super::common::{
+    image_hash_name, image_placeholder, parse_docx_blocks, parse_rels_xml_images, DocxBlock,
+    DocxBlockKind,
+};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::time::Instant;
+use zip::ZipArchive;
 
 const MAX_SECTION_CHARS: usize = 2000;
 
@@ -24,6 +30,7 @@ struct DocumentBlock {
     block_type: BlockType,
     text: String,
     heading_level: Option<u32>,
+    image_rid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +82,107 @@ fn chunk_docx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     Ok(result.into_any().unbind())
 }
 
+fn build_section_chunks_with_images(
+    blocks: Vec<DocumentBlock>,
+    image_rids_map: &HashMap<String, String>,
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<(String, String, serde_json::Value)> {
+    let mut result: Vec<(String, String, serde_json::Value)> = Vec::new();
+    let section_chunks = build_section_chunks(blocks.clone());
+
+    let mut image_results: Vec<(String, String, serde_json::Value)> = Vec::new();
+    for block in &blocks {
+        if block.block_type != BlockType::Image {
+            continue;
+        }
+        if let Some(rid) = &block.image_rid {
+            if let Some(zip_path) = image_rids_map.get(rid) {
+                if let Ok(mut entry) = archive.by_name(zip_path) {
+                    let mut bytes = Vec::new();
+                    if entry.read_to_end(&mut bytes).is_ok() {
+                        if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                            if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                                image_out.push((hash_name.clone(), bytes));
+                            }
+                            let alt = block
+                                .text
+                                .strip_prefix("[Image: ")
+                                .and_then(|s| s.strip_suffix(']'))
+                                .unwrap_or("");
+                            image_results.push((
+                                "image".to_string(),
+                                hash_name.clone(),
+                                json!({ "image_name": hash_name, "alt_text": alt }),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result.extend(image_results);
+    for chunk in section_chunks {
+        result.push(("section".to_string(), chunk.content, chunk.metadata));
+    }
+    result
+}
+
+#[pyfunction]
+fn chunk_docx_section_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let cursor = Cursor::new(bytes.clone());
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid DOCX ZIP: {e}")))?;
+
+    let image_rids_map = match archive.by_name("word/_rels/document.xml.rels") {
+        Ok(mut f) => {
+            let mut xml = String::new();
+            let _ = f.read_to_string(&mut xml);
+            parse_rels_xml_images(&xml)
+        }
+        Err(_) => HashMap::new(),
+    };
+
+    let raw_blocks = parse_docx_blocks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let blocks = lower_blocks(raw_blocks);
+
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let combined =
+        build_section_chunks_with_images(blocks, &image_rids_map, &mut archive, &mut image_out);
+
+    let chunk_list: Vec<PyObject> = combined
+        .iter()
+        .map(|(content_type, content, metadata)| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", content)?;
+            dict.set_item("content_type", content_type)?;
+            dict.set_item("metadata", pythonize(py, metadata)?)?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((chunk_list, image_out_py))
+}
+
 fn lower_blocks(raw: Vec<DocxBlock>) -> Vec<DocumentBlock> {
     let mut out: Vec<DocumentBlock> = Vec::with_capacity(raw.len());
 
@@ -87,6 +195,7 @@ fn lower_blocks(raw: Vec<DocxBlock>) -> Vec<DocumentBlock> {
                         block_type: BlockType::Table,
                         text: table_text,
                         heading_level: None,
+                        image_rid: None,
                     });
                 }
             }
@@ -121,6 +230,11 @@ fn lower_blocks(raw: Vec<DocxBlock>) -> Vec<DocumentBlock> {
                     block_type,
                     text: normalized,
                     heading_level,
+                    image_rid: if block.has_drawing {
+                        block.image_rid.clone()
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -383,6 +497,7 @@ fn chunk_docx_section_stream(file_path: &str) -> PyResult<DocxSectionIterator> {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx_section, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_section_with_images, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_docx_section_stream, m)?)?;
     m.add_class::<DocxSectionIterator>()?;
     Ok(())

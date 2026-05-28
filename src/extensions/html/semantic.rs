@@ -114,11 +114,10 @@ impl SemAccum {
                 "initial"
             }
         } else {
-            counts
-                .iter()
-                .max_by_key(|(_, v)| *v)
-                .map(|(k, _)| *k)
-                .unwrap_or("keyword_overlap")
+            // Sort by (count desc, key asc) for determinism when counts are tied.
+            let mut reason_vec: Vec<(&'static str, usize)> = counts.into_iter().collect();
+            reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            reason_vec.first().map(|(k, _)| *k).unwrap_or("keyword_overlap")
         };
         let tw = content.split_whitespace().count().max(1);
         let kd = (self.keywords.len() as f64 / tw as f64 * 1000.0).round() / 1000.0;

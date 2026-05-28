@@ -177,3 +177,56 @@ def pptx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]
         raise ValueError(f"Expected a .pptx file, got: {file_path}")
     md, image_list = _rust.pptx_to_markdown_with_images(str(path))
     return md, dict(image_list)
+
+
+def chunk_pptx_with_images(
+    file_path: str,
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 5,
+    slides_per_chunk: int | None = None,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk a PPTX file with images extracted as dedicated chunks.
+
+    Returns (chunks, images) where images maps hash-named filenames to raw bytes.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PPTX file not found: {file_path}")
+    if path.suffix.lower() != ".pptx":
+        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+
+    _slides = slides_per_chunk if slides_per_chunk is not None else paragraphs_per_page
+    normalized_mode = "structural" if mode == "default" else mode
+    path_str = str(path)
+
+    if normalized_mode == "structural":
+        chunk_list, image_list = _rust.chunk_pptx_structural_with_images(path_str)
+    elif normalized_mode == "section":
+        chunk_list, image_list = _rust.chunk_pptx_section_with_images(path_str)
+    elif normalized_mode == "semantic":
+        chunk_list, image_list = _rust.chunk_pptx_semantic_with_images(path_str)
+    elif normalized_mode == "sliding_window":
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        if overlap >= window_size:
+            raise ValueError("overlap must be less than window_size")
+        chunk_list, image_list = _rust.chunk_pptx_sliding_window_with_images(
+            path_str, window_size, overlap
+        )
+    elif normalized_mode == "sentence":
+        if sentences_per_chunk <= 0:
+            raise ValueError("sentences_per_chunk must be greater than 0")
+        chunk_list, image_list = _rust.chunk_pptx_sentence_with_images(
+            path_str, sentences_per_chunk
+        )
+    elif normalized_mode == "page_aware":
+        if _slides <= 0:
+            raise ValueError("slides_per_chunk must be greater than 0")
+        chunk_list, image_list = _rust.chunk_pptx_page_aware_with_images(path_str, _slides)
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}")
+
+    return chunk_list, dict(image_list)

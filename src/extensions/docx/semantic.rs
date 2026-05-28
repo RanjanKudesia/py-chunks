@@ -1,16 +1,20 @@
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 use serde_json::{json, Value};
 
 use super::common::{
-    collapse_whitespace, docx_heading_level, parse_docx_blocks, DocxBlock, DocxBlockKind,
+    collapse_whitespace, docx_heading_level, image_hash_name, parse_docx_blocks,
+    parse_rels_xml_images, DocxBlock, DocxBlockKind,
 };
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::io::{Cursor, Read};
 use std::time::Instant;
+use zip::ZipArchive;
 
 const MAX_CHUNK_CHARS: usize = 1500;
 const SHORT_PARAGRAPH_CHARS: usize = 80;
@@ -42,6 +46,8 @@ struct SemanticParagraph {
     text: String,
     is_heading: bool,
     heading_level: Option<u32>,
+    is_image: bool,
+    image_rid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +98,110 @@ fn chunk_docx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     Ok(result.into_any().unbind())
 }
 
+fn build_semantic_chunks_with_images(
+    paragraphs: Vec<SemanticParagraph>,
+    image_rids_map: &HashMap<String, String>,
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<(String, String, serde_json::Value)> {
+    let mut result: Vec<(String, String, serde_json::Value)> = Vec::new();
+
+    for para in &paragraphs {
+        if !para.is_image {
+            continue;
+        }
+        if let Some(rid) = &para.image_rid {
+            if let Some(zip_path) = image_rids_map.get(rid) {
+                if let Ok(mut entry) = archive.by_name(zip_path) {
+                    let mut bytes = Vec::new();
+                    if entry.read_to_end(&mut bytes).is_ok() {
+                        if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                            if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                                image_out.push((hash_name.clone(), bytes));
+                            }
+                            let alt = para
+                                .text
+                                .strip_prefix("[Image: ")
+                                .and_then(|s| s.strip_suffix(']'))
+                                .unwrap_or("");
+                            result.push((
+                                "image".to_string(),
+                                hash_name.clone(),
+                                json!({ "image_name": hash_name, "alt_text": alt }),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let text_chunks = build_semantic_chunks(paragraphs);
+    for chunk in text_chunks {
+        result.push(("semantic".to_string(), chunk.content, chunk.metadata));
+    }
+
+    result
+}
+
+#[pyfunction]
+fn chunk_docx_semantic_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    let cursor = Cursor::new(bytes.clone());
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid DOCX ZIP: {e}")))?;
+
+    let image_rids_map = match archive.by_name("word/_rels/document.xml.rels") {
+        Ok(mut f) => {
+            let mut xml = String::new();
+            let _ = f.read_to_string(&mut xml);
+            parse_rels_xml_images(&xml)
+        }
+        Err(_) => HashMap::new(),
+    };
+
+    let raw_blocks = parse_docx_blocks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+    let paragraphs = lower_blocks_to_paragraphs(raw_blocks);
+
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let combined = build_semantic_chunks_with_images(
+        paragraphs,
+        &image_rids_map,
+        &mut archive,
+        &mut image_out,
+    );
+
+    let chunk_list: Vec<PyObject> = combined
+        .iter()
+        .map(|(content_type, content, metadata)| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", content)?;
+            dict.set_item("content_type", content_type)?;
+            dict.set_item("metadata", pythonize(py, metadata)?)?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((chunk_list, image_out_py))
+}
+
 fn lower_blocks_to_paragraphs(raw: Vec<DocxBlock>) -> Vec<SemanticParagraph> {
     let mut out: Vec<SemanticParagraph> = Vec::with_capacity(raw.len());
 
@@ -104,6 +214,8 @@ fn lower_blocks_to_paragraphs(raw: Vec<DocxBlock>) -> Vec<SemanticParagraph> {
                         text: table_text,
                         is_heading: false,
                         heading_level: None,
+                        is_image: false,
+                        image_rid: None,
                     });
                 }
             }
@@ -122,12 +234,16 @@ fn lower_blocks_to_paragraphs(raw: Vec<DocxBlock>) -> Vec<SemanticParagraph> {
                         text: normalized,
                         is_heading,
                         heading_level,
+                        is_image: block.has_drawing,
+                        image_rid: block.image_rid.clone(),
                     });
                 } else if block.has_drawing {
                     out.push(SemanticParagraph {
                         text: super::common::image_placeholder(block.image_alt.as_deref()),
                         is_heading: false,
                         heading_level: None,
+                        is_image: true,
+                        image_rid: block.image_rid.clone(),
                     });
                 }
             }
@@ -144,6 +260,8 @@ fn build_semantic_chunks(paragraphs: Vec<SemanticParagraph>) -> Vec<ChunkRecordI
             text: collapse_whitespace(&p.text),
             is_heading: p.is_heading,
             heading_level: p.heading_level,
+            is_image: p.is_image,
+            image_rid: p.image_rid,
         })
         .filter(|p| !p.text.is_empty())
         .collect();
@@ -509,6 +627,7 @@ fn chunk_docx_semantic_stream(file_path: &str) -> PyResult<DocxSemanticIterator>
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx_semantic, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_semantic_with_images, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_docx_semantic_stream, m)?)?;
     m.add_class::<DocxSemanticIterator>()?;
     Ok(())

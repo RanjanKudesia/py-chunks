@@ -10,7 +10,7 @@
 /// Output schema: standard { content, content_type, metadata }.
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 use serde_json::json;
@@ -18,8 +18,9 @@ use std::fs;
 use std::time::Instant;
 
 use super::common::{
-    classify_chunk, collect_slide_names, open_pptx, parse_presentation_sections, read_all_slides,
-    split_large_text, ChunkRecordInput, ContentType, SlideContent,
+    classify_chunk, collect_all_slide_images, collect_slide_names, open_pptx,
+    parse_presentation_sections, read_all_slides, split_large_text, ChunkRecordInput, ContentType,
+    SlideContent,
 };
 
 const MAX_SECTION_CHARS: usize = 2000;
@@ -151,7 +152,8 @@ fn build_from_divider_heuristic(
             flush_section_body(result, name, body, total);
         } else if !body.is_empty() {
             // Use the first slide's title as the section name instead of a hard-coded string.
-            let intro_name = body.first()
+            let intro_name = body
+                .first()
                 .and_then(|(_, _, t)| t.as_ref().map(|s| s.as_str()))
                 .unwrap_or("Introduction")
                 .to_string();
@@ -255,7 +257,69 @@ pub fn chunk_pptx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject>
     Ok(result.into_any().unbind())
 }
 
+#[pyfunction]
+pub fn chunk_pptx_section_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .pptx file path, got: {file_path}"
+        )));
+    }
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read PPTX file: {e}")))?;
+
+    let mut archive =
+        open_pptx(&bytes).map_err(|e| PyRuntimeError::new_err(format!("PPTX zip error: {e}")))?;
+    let slide_names = collect_slide_names(&archive);
+    let total_slides = slide_names.len();
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let image_infos =
+        collect_all_slide_images(&mut archive, &slide_names, total_slides, &mut image_out);
+
+    let mut chunk_list: Vec<PyObject> = image_infos
+        .into_iter()
+        .map(|info| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", &info.hash_name)?;
+            dict.set_item("content_type", "image")?;
+            dict.set_item(
+                "metadata",
+                pythonize(
+                    py,
+                    &json!({
+                        "slide_number": info.slide_num,
+                        "image_name": info.hash_name,
+                        "alt_text": info.alt_text,
+                        "document_metadata": { "source_type": "pptx", "total_slides": total_slides }
+                    }),
+                )?,
+            )?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+
+    let chunks_raw = build_section_chunks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("PPTX section chunking failed: {e}")))?;
+    for c in chunks_raw {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("content", &c.content)?;
+        dict.set_item("content_type", c.content_type.as_str())?;
+        dict.set_item("metadata", pythonize(py, &c.metadata)?)?;
+        chunk_list.push(dict.into_any().unbind());
+    }
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((chunk_list, image_out_py))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_pptx_section, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pptx_section_with_images, m)?)?;
     Ok(())
 }

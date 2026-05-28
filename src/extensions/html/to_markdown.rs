@@ -2,8 +2,10 @@ use std::fs;
 
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyModule;
+use pyo3::types::{PyBytes, PyModule};
 use pyo3::wrap_pyfunction;
+
+use super::images::collect_html_images;
 
 use super::common::{parse_html_blocks, remove_comments, HtmlBlockType};
 
@@ -116,7 +118,44 @@ pub fn html_to_markdown(file_path: &str) -> PyResult<String> {
     Ok(html_to_markdown_str(&html))
 }
 
+#[pyfunction]
+pub fn html_to_markdown_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+    let lower = file_path.to_ascii_lowercase();
+    if !lower.ends_with(".html") && !lower.ends_with(".htm") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .html or .htm file path, got: {file_path}"
+        )));
+    }
+
+    let html = fs::read_to_string(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read HTML file: {e}")))?;
+
+    // Text output: identical to html_to_markdown — text parity guaranteed.
+    let mut markdown = html_to_markdown_str(&html);
+
+    // Image extraction.
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let image_infos = collect_html_images(&html, file_path, &mut image_out);
+
+    // Append image references at the end (no alt text in the markdown string;
+    // alt text is available in chunk metadata for get_chunks users).
+    for info in &image_infos {
+        markdown.push_str(&format!("\n\n![]({})", info.hash_name));
+    }
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((markdown.trim_start().to_string(), image_out_py))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(html_to_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(html_to_markdown_with_images, m)?)?;
     Ok(())
 }

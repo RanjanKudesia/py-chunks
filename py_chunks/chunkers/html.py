@@ -113,3 +113,46 @@ def html_to_markdown(file_path: str) -> str:
     if path.suffix.lower() not in (".html", ".htm"):
         raise ValueError(f"Expected a .html or .htm file, got: {file_path}")
     return _rust.html_to_markdown(str(path))
+
+
+def chunk_html_with_images(
+    file_path: str,
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk an HTML file and extract embedded images as dedicated chunks.
+
+    Returns (chunks, images) where images maps hash-named filenames to raw bytes.
+    Supports base64 data URI images and local file references. Remote URLs are skipped.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"HTML file not found: {file_path}")
+    if path.suffix.lower() not in _HTML_EXTS:
+        raise ValueError(f"Expected a .html / .htm file, got: {file_path}")
+    if mode not in _HTML_MODES:
+        raise ValueError(
+            f"mode must be one of {sorted(_HTML_MODES)} for HTML, got: '{mode}'"
+        )
+    chunk_list, image_list = _rust.chunk_html_with_images(
+        str(path), mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
+    )
+    return chunk_list, dict(image_list)
+
+
+def html_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert an HTML file to Markdown and extract embedded images.
+
+    Returns (markdown, images) where markdown contains ![alt](hash.ext) references
+    and images maps hash-named filenames to raw bytes.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"HTML file not found: {file_path}")
+    if path.suffix.lower() not in (".html", ".htm"):
+        raise ValueError(f"Expected a .html or .htm file, got: {file_path}")
+    md, image_list = _rust.html_to_markdown_with_images(str(path))
+    return md, dict(image_list)

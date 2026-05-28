@@ -5,7 +5,8 @@ from pathlib import Path
 
 from py_chunks import _rust
 
-_XLSX_MODES = {"row", "table", "sheet", "sliding_window", "page_aware", "semantic"}
+_XLSX_MODES = {"row", "table", "sheet",
+               "sliding_window", "page_aware", "semantic"}
 _XLSX_SERIALIZERS = {"key_value"}
 
 
@@ -166,3 +167,68 @@ def xlsx_to_markdown(file_path: str) -> str:
     if path.suffix.lower() not in (".xlsx", ".xls"):
         raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
     return _rust.xlsx_to_markdown(str(path))
+
+
+def chunk_xlsx_with_images(
+    file_path: str,
+    mode: str = "row",
+    rows_per_chunk: int = 1,
+    window_size: int = 3,
+    overlap: int = 1,
+    include_headers: bool = True,
+    sheet_names: list[str] | None = None,
+    skip_empty_rows: bool = True,
+    max_chunk_chars: int = 2000,
+    sentences_per_chunk: int | None = None,
+    paragraphs_per_page: int | None = None,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk an XLSX/XLS file and extract embedded XLSX images as image chunks.
+
+    For .xlsx, images are extracted and returned as a dict keyed by hash filename.
+    For .xls, image extraction is unsupported and returns an empty dict.
+    """
+    path = Path(file_path)
+    normalized_mode = "row" if mode == "default" else mode
+
+    if sentences_per_chunk is not None and rows_per_chunk == 1:
+        rows_per_chunk = 1 if sentences_per_chunk == 3 else sentences_per_chunk
+    # For API compatibility with get_chunks(..., mode="page_aware").
+    _ = paragraphs_per_page
+
+    _validate_xlsx_args(
+        file_path,
+        path,
+        normalized_mode,
+        rows_per_chunk,
+        window_size,
+        overlap,
+        "key_value",
+        max_chunk_chars,
+    )
+    chunk_list, image_list = _rust.chunk_xlsx_with_images(
+        str(path),
+        normalized_mode,
+        rows_per_chunk,
+        window_size,
+        overlap,
+        include_headers,
+        sheet_names or [],
+        skip_empty_rows,
+        max_chunk_chars,
+    )
+    return chunk_list, dict(image_list)
+
+
+def xlsx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert an XLSX/XLS file to Markdown and extract embedded XLSX images.
+
+    For .xlsx, markdown includes ![](hash.ext) references after each sheet section.
+    For .xls, conversion succeeds and image dict is empty.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
+    if path.suffix.lower() not in (".xlsx", ".xls"):
+        raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
+    md, image_list = _rust.xlsx_to_markdown_with_images(str(path))
+    return md, dict(image_list)

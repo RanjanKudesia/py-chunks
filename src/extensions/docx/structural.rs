@@ -1,13 +1,14 @@
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 use quick_xml::escape::unescape;
 use serde_json::{json, Value};
 
 use super::common::{
-    docx_heading_level, image_placeholder, parse_docx_blocks, DocxBlock, DocxBlockKind,
+    docx_heading_level, image_hash_name, image_placeholder, parse_docx_blocks,
+    parse_rels_xml_images, DocxBlock, DocxBlockKind,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -73,6 +74,9 @@ struct DocumentElement {
     /// IDs of endnotes (`word/endnotes.xml`) referenced by this element's
     /// source paragraph.
     endnote_refs: Vec<String>,
+    /// Relationship ID (`r:embed`) of the image contained in this element.
+    /// `None` for non-image elements or when the rId was not captured.
+    image_rid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +192,7 @@ fn parse_docx_document(bytes: &[u8]) -> Result<DocParseResult, String> {
             heading_level: None,
             footnote_refs: Vec::new(),
             endnote_refs: Vec::new(),
+            image_rid: None,
         });
     }
 
@@ -203,6 +208,7 @@ fn parse_docx_document(bytes: &[u8]) -> Result<DocParseResult, String> {
             heading_level: None,
             footnote_refs: Vec::new(),
             endnote_refs: Vec::new(),
+            image_rid: None,
         });
     }
 
@@ -240,6 +246,7 @@ fn lower_blocks_to_elements(raw: Vec<DocxBlock>) -> Vec<DocumentElement> {
                         heading_level: None,
                         footnote_refs: block.footnote_refs.clone(),
                         endnote_refs: block.endnote_refs.clone(),
+                        image_rid: None,
                     });
                 }
             }
@@ -273,6 +280,7 @@ fn lower_blocks_to_elements(raw: Vec<DocxBlock>) -> Vec<DocumentElement> {
                         },
                         footnote_refs: block.footnote_refs.clone(),
                         endnote_refs: block.endnote_refs.clone(),
+                        image_rid: block.image_rid.clone(),
                     });
                 }
             }
@@ -394,6 +402,7 @@ fn build_chunks_from_elements(
                         heading_level: None,
                         footnote_refs: merged_footnotes,
                         endnote_refs: merged_endnotes,
+                        image_rid: None,
                     });
                 } else {
                     flush_outside_shorts(
@@ -539,6 +548,318 @@ fn build_chunks_from_elements(
                             ),
                         });
                     }
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    flush_outside_shorts(
+        &mut chunks,
+        &mut outside_short_parts,
+        &mut outside_short_first_page,
+        doc_metadata,
+        footnote_map,
+        endnote_map,
+    );
+    flush_section(
+        &mut chunks,
+        &mut section_heading,
+        &mut section_parts,
+        doc_metadata,
+        footnote_map,
+        endnote_map,
+    );
+
+    chunks
+}
+
+fn build_chunks_from_elements_with_images(
+    elements: Vec<DocumentElement>,
+    doc_metadata: &Value,
+    footnote_map: &HashMap<String, String>,
+    endnote_map: &HashMap<String, String>,
+    image_rids_map: &HashMap<String, String>,
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<ChunkRecordInput> {
+    let mut chunks = Vec::new();
+    let mut section_heading: Option<String> = None;
+    let mut section_parts: Vec<DocumentElement> = Vec::new();
+    let mut outside_short_parts: Vec<DocumentElement> = Vec::new();
+    let mut outside_short_first_page: Option<usize> = None;
+
+    let mut i = 0usize;
+    while i < elements.len() {
+        let element = &elements[i];
+
+        match element.content_type {
+            ContentType::HeaderFooter
+            | ContentType::FootnoteCaption
+            | ContentType::MixedContent => {}
+            ContentType::HeadingSection => {
+                flush_outside_shorts(
+                    &mut chunks,
+                    &mut outside_short_parts,
+                    &mut outside_short_first_page,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                flush_section(
+                    &mut chunks,
+                    &mut section_heading,
+                    &mut section_parts,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                section_heading = Some(element.text.clone());
+                section_parts.push(element.clone());
+            }
+            ContentType::BulletNumberedList => {
+                let mut bullets: Vec<DocumentElement> = vec![element.clone()];
+                let mut j = i + 1;
+                while j < elements.len()
+                    && elements[j].content_type == ContentType::BulletNumberedList
+                {
+                    bullets.push(elements[j].clone());
+                    j += 1;
+                }
+                let list_text = bullets
+                    .iter()
+                    .map(|b| b.text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                if section_heading.is_some() {
+                    let mut merged_footnotes: Vec<String> = Vec::new();
+                    let mut merged_endnotes: Vec<String> = Vec::new();
+                    for b in &bullets {
+                        merged_footnotes.extend(b.footnote_refs.iter().cloned());
+                        merged_endnotes.extend(b.endnote_refs.iter().cloned());
+                    }
+                    section_parts.push(DocumentElement {
+                        content_type: ContentType::BulletNumberedList,
+                        text: list_text,
+                        page_number: element.page_number,
+                        heading_level: None,
+                        footnote_refs: merged_footnotes,
+                        endnote_refs: merged_endnotes,
+                        image_rid: None,
+                    });
+                } else {
+                    flush_outside_shorts(
+                        &mut chunks,
+                        &mut outside_short_parts,
+                        &mut outside_short_first_page,
+                        doc_metadata,
+                        footnote_map,
+                        endnote_map,
+                    );
+                    let mut fns = Vec::new();
+                    let mut ens = Vec::new();
+                    for b in &bullets {
+                        collect_element_refs(b, footnote_map, endnote_map, &mut fns, &mut ens);
+                    }
+                    chunks.push(ChunkRecordInput {
+                        content_type: ContentType::BulletNumberedList,
+                        content: list_text,
+                        metadata: base_chunk_metadata(
+                            None,
+                            None,
+                            &fns,
+                            &ens,
+                            doc_metadata,
+                            element.page_number,
+                        ),
+                    });
+                }
+                i = j - 1;
+            }
+            ContentType::Table => {
+                flush_outside_shorts(
+                    &mut chunks,
+                    &mut outside_short_parts,
+                    &mut outside_short_first_page,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                flush_section(
+                    &mut chunks,
+                    &mut section_heading,
+                    &mut section_parts,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                let mut fns = Vec::new();
+                let mut ens = Vec::new();
+                collect_element_refs(element, footnote_map, endnote_map, &mut fns, &mut ens);
+                chunks.push(ChunkRecordInput {
+                    content_type: ContentType::Table,
+                    content: element.text.clone(),
+                    metadata: base_chunk_metadata(
+                        None,
+                        None,
+                        &fns,
+                        &ens,
+                        doc_metadata,
+                        element.page_number,
+                    ),
+                });
+            }
+            ContentType::CodeBlock => {
+                flush_outside_shorts(
+                    &mut chunks,
+                    &mut outside_short_parts,
+                    &mut outside_short_first_page,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                flush_section(
+                    &mut chunks,
+                    &mut section_heading,
+                    &mut section_parts,
+                    doc_metadata,
+                    footnote_map,
+                    endnote_map,
+                );
+                let mut fns = Vec::new();
+                let mut ens = Vec::new();
+                collect_element_refs(element, footnote_map, endnote_map, &mut fns, &mut ens);
+                chunks.push(ChunkRecordInput {
+                    content_type: ContentType::CodeBlock,
+                    content: element.text.clone(),
+                    metadata: base_chunk_metadata(
+                        None,
+                        None,
+                        &fns,
+                        &ens,
+                        doc_metadata,
+                        element.page_number,
+                    ),
+                });
+            }
+            ContentType::ShortDisconnectedParagraph => {
+                if section_heading.is_some() {
+                    section_parts.push(element.clone());
+                } else {
+                    if outside_short_parts.is_empty() {
+                        outside_short_first_page = element.page_number;
+                    }
+                    outside_short_parts.push(element.clone());
+                }
+            }
+            ContentType::PlainParagraph | ContentType::LongSingleParagraph => {
+                if section_heading.is_some() {
+                    section_parts.push(element.clone());
+                } else {
+                    flush_outside_shorts(
+                        &mut chunks,
+                        &mut outside_short_parts,
+                        &mut outside_short_first_page,
+                        doc_metadata,
+                        footnote_map,
+                        endnote_map,
+                    );
+                    let split = semantic_chunks(&element.text, SEMANTIC_SPLIT_MAX_BYTES);
+                    let mut fns = Vec::new();
+                    let mut ens = Vec::new();
+                    collect_element_refs(element, footnote_map, endnote_map, &mut fns, &mut ens);
+                    for (idx, s) in split.into_iter().enumerate() {
+                        let (chunk_fns, chunk_ens): (&[(String, String)], &[(String, String)]) =
+                            if idx == 0 {
+                                (fns.as_slice(), ens.as_slice())
+                            } else {
+                                (&[], &[])
+                            };
+                        chunks.push(ChunkRecordInput {
+                            content_type: element.content_type,
+                            content: s,
+                            metadata: base_chunk_metadata(
+                                None,
+                                None,
+                                chunk_fns,
+                                chunk_ens,
+                                doc_metadata,
+                                element.page_number,
+                            ),
+                        });
+                    }
+                }
+            }
+            ContentType::Image => {
+                if section_heading.is_some() {
+                    // Inside a section: emit a standalone image chunk immediately,
+                    // then push the element to section_parts so the section text
+                    // is identical to the list_images=False path.
+                    if let Some(rid) = element.image_rid.as_deref() {
+                        if let Some(zip_path) = image_rids_map.get(rid) {
+                            if let Ok(mut entry) = archive.by_name(zip_path) {
+                                let mut bytes = Vec::new();
+                                if entry.read_to_end(&mut bytes).is_ok() {
+                                    if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                                        if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                                            image_out.push((hash_name.clone(), bytes));
+                                        }
+                                        chunks.push(ChunkRecordInput {
+                                            content_type: ContentType::Image,
+                                            content: hash_name.clone(),
+                                            metadata: json!({
+                                                "image_name": hash_name,
+                                                "alt_text": element.text
+                                                    .strip_prefix("[Image: ")
+                                                    .and_then(|s| s.strip_suffix(']'))
+                                                    .unwrap_or(""),
+                                            }),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    section_parts.push(element.clone());
+                } else {
+                    // Outside section: flush accumulated short paragraphs first,
+                    // then emit image chunk.
+                    flush_outside_shorts(
+                        &mut chunks,
+                        &mut outside_short_parts,
+                        &mut outside_short_first_page,
+                        doc_metadata,
+                        footnote_map,
+                        endnote_map,
+                    );
+                    if let Some(rid) = element.image_rid.as_deref() {
+                        if let Some(zip_path) = image_rids_map.get(rid) {
+                            if let Ok(mut entry) = archive.by_name(zip_path) {
+                                let mut bytes = Vec::new();
+                                if entry.read_to_end(&mut bytes).is_ok() {
+                                    if let Some(hash_name) = image_hash_name(&bytes, zip_path) {
+                                        if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                                            image_out.push((hash_name.clone(), bytes));
+                                        }
+                                        chunks.push(ChunkRecordInput {
+                                            content_type: ContentType::Image,
+                                            content: hash_name.clone(),
+                                            metadata: json!({
+                                                "image_name": hash_name,
+                                                "alt_text": element.text
+                                                    .strip_prefix("[Image: ")
+                                                    .and_then(|s| s.strip_suffix(']'))
+                                                    .unwrap_or(""),
+                                            }),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Unsupported format (.emf etc.) or missing rid — skip silently
                 }
             }
         }
@@ -1084,6 +1405,7 @@ impl DocxStructuralIterator {
                         heading_level: None,
                         footnote_refs: Vec::new(),
                         endnote_refs: Vec::new(),
+                        image_rid: None,
                     });
                 }
                 if self.outside_short_parts.is_empty() {
@@ -1248,6 +1570,7 @@ impl DocxStructuralIterator {
                             heading_level: None,
                             footnote_refs: merged_footnotes,
                             endnote_refs: merged_endnotes,
+                            image_rid: None,
                         });
                         self.element_index = j;
                     } else {
@@ -1384,6 +1707,7 @@ impl DocxStructuralIterator {
                                         heading_level: None,
                                         footnote_refs: Vec::new(),
                                         endnote_refs: Vec::new(),
+                                        image_rid: None,
                                     });
                                 }
                             }
@@ -1500,8 +1824,79 @@ fn chunk_docx_structural_stream(file_path: &str) -> PyResult<DocxStructuralItera
     })
 }
 
+#[pyfunction]
+fn chunk_docx_structural_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .docx file path, got: {file_path}"
+        )));
+    }
+
+    let bytes = fs::read(file_path)
+        .map_err(|e| PyIOError::new_err(format!("Failed to read DOCX file: {e}")))?;
+
+    // Open archive once for image rels map and again for byte extraction
+    let cursor = Cursor::new(bytes.clone());
+    let mut archive = ZipArchive::new(cursor)
+        .map_err(|e| PyRuntimeError::new_err(format!("Not a valid DOCX ZIP: {e}")))?;
+
+    // Parse image relationship map
+    let image_rids_map = {
+        let rels_xml = read_zip_entry(
+            &mut archive,
+            "word/_rels/document.xml.rels",
+            MAX_DOCX_AUX_XML_BYTES,
+        )
+        .unwrap_or(None);
+        rels_xml
+            .as_deref()
+            .map(parse_rels_xml_images)
+            .unwrap_or_default()
+    };
+
+    let rust_start = Instant::now();
+
+    let parsed = parse_docx_document(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse DOCX: {e}")))?;
+
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let chunks_raw = build_chunks_from_elements_with_images(
+        parsed.elements,
+        &parsed.doc_metadata,
+        &parsed.footnote_map,
+        &parsed.endnote_map,
+        &image_rids_map,
+        &mut archive,
+        &mut image_out,
+    );
+
+    let _rust_ms = rust_start.elapsed().as_secs_f64() * 1000.0;
+
+    let chunk_list: Vec<PyObject> = chunks_raw
+        .into_iter()
+        .map(|c| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", &c.content)?;
+            dict.set_item("content_type", c.content_type.as_str())?;
+            dict.set_item("metadata", pythonize(py, &c.metadata)?)?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((chunk_list, image_out_py))
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_docx, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_docx_structural_with_images, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_docx_structural_stream, m)?)?;
     m.add_class::<DocxStructuralIterator>()?;
     Ok(())

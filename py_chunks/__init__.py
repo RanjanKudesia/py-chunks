@@ -5,6 +5,27 @@ that accept paths, bytes, file-like objects, upload objects, and pre-signed
 URLs.
 """
 
+from .chunkers.xlsx import (
+    chunk_xlsx,
+    chunk_xlsx_with_images as _chunk_xlsx_with_images,
+    stream_chunk_xlsx,
+    xlsx_to_markdown as _xlsx_to_markdown,
+    xlsx_to_markdown_with_images as _xlsx_to_markdown_with_images,
+)
+from .chunkers.txt import chunk_txt, stream_chunk_txt, txt_to_markdown as _txt_to_markdown
+from .chunkers.pptx import chunk_pptx, chunk_pptx_with_images as _chunk_pptx_with_images, pptx_to_markdown as _pptx_to_markdown, pptx_to_markdown_with_images as _pptx_to_markdown_with_images, stream_chunk_pptx
+from .chunkers.pdf import chunk_pdf, pdf_to_markdown as _pdf_to_markdown, stream_chunk_pdf
+from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
+from .chunkers.html import (
+    chunk_html,
+    stream_chunk_html,
+    html_to_markdown as _html_to_markdown,
+    chunk_html_with_images as _chunk_html_with_images,
+    html_to_markdown_with_images as _html_to_markdown_with_images,
+)
+from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
+from .chunkers.doc import chunk_doc, doc_to_markdown as _doc_to_markdown, stream_chunk_doc
+from .chunkers.docx import chunk_docx, chunk_docx_with_images as _chunk_docx_with_images, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
 import os
 import sys
 import tempfile
@@ -40,22 +61,20 @@ if _pdfium_bin.exists():
 if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
     os.add_dll_directory(str(_pkg_dir))
 
-from .chunkers.docx import chunk_docx, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
-from .chunkers.doc import chunk_doc, doc_to_markdown as _doc_to_markdown, stream_chunk_doc
-from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
-from .chunkers.html import chunk_html, stream_chunk_html, html_to_markdown as _html_to_markdown
-from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
-from .chunkers.pdf import chunk_pdf, pdf_to_markdown as _pdf_to_markdown, stream_chunk_pdf
-from .chunkers.pptx import chunk_pptx, pptx_to_markdown as _pptx_to_markdown, pptx_to_markdown_with_images as _pptx_to_markdown_with_images, stream_chunk_pptx
-from .chunkers.txt import chunk_txt, stream_chunk_txt, txt_to_markdown as _txt_to_markdown
-from .chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx, xlsx_to_markdown as _xlsx_to_markdown
-
 
 @dataclass
 class MarkdownResult:
     """Return type of get_markdown() when list_images=True."""
 
     markdown: str
+    images: dict[str, bytes] = field(default_factory=dict)
+
+
+@dataclass
+class ChunksResult:
+    """Return type of get_chunks() when list_images=True."""
+
+    chunks: list[dict]
     images: dict[str, bytes] = field(default_factory=dict)
 
 
@@ -90,6 +109,17 @@ _MD_DISPATCH = {
 _MD_IMAGE_DISPATCH: dict[str, Any] = {
     ".docx": _docx_to_markdown_with_images,
     ".pptx": _pptx_to_markdown_with_images,
+    ".xlsx": _xlsx_to_markdown_with_images,
+    ".html": _html_to_markdown_with_images,
+    ".htm":  _html_to_markdown_with_images,
+}
+
+_CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
+    ".docx": _chunk_docx_with_images,
+    ".pptx": _chunk_pptx_with_images,
+    ".xlsx": _chunk_xlsx_with_images,
+    ".html": _chunk_html_with_images,
+    ".htm":  _chunk_html_with_images,
 }
 
 
@@ -116,6 +146,7 @@ def _get_markdown_from_temp_data(data: bytes, ext: str, list_images: bool = Fals
         return md
     finally:
         os.unlink(tmp_path)
+
 
 _EXT_DOCX = ".docx"
 _EXT_CSV = ".csv"
@@ -223,7 +254,8 @@ def get_chunks_from_path(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Chunk any supported document from a local path.
 
     Supported extensions: .csv, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xlsx
@@ -243,6 +275,49 @@ def get_chunks_from_path(
 
     chunker, ext = _resolve_chunker(file_path)
 
+    if list_images:
+        if ext in _CHUNKS_IMAGE_DISPATCH:
+            chunk_list, images = _CHUNKS_IMAGE_DISPATCH[ext](
+                file_path, mode=mode, window_size=window_size,
+                overlap=overlap, sentences_per_chunk=sentences_per_chunk,
+                paragraphs_per_page=paragraphs_per_page,
+            )
+            return ChunksResult(chunks=chunk_list, images=images)
+        else:
+            # Unsupported format — silent fallback, no images
+            if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
+                chunks, _ = chunk_xlsx(
+                    file_path,
+                    mode="row" if mode == "default" else mode,
+                    rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+                    window_size=window_size,
+                    overlap=overlap,
+                )
+                return ChunksResult(chunks=chunks, images={})
+            if ext == _EXT_CSV:
+                csv_mode = "row" if mode == "default" else mode
+                rows_per_chunk = (
+                    paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                        sentences_per_chunk)
+                )
+                chunks, _ = chunk_csv(
+                    file_path,
+                    mode=csv_mode,
+                    rows_per_chunk=rows_per_chunk,
+                    window_size=window_size,
+                    overlap=overlap,
+                    include_headers=True,
+                    delimiter=delimiter,
+                    encoding=encoding,
+                    skip_empty_rows=True,
+                )
+                return ChunksResult(chunks=chunks, images={})
+            chunks, _ = _run_chunker(
+                chunker, file_path, mode, window_size,
+                overlap, sentences_per_chunk, paragraphs_per_page,
+            )
+            return ChunksResult(chunks=chunks, images={})
+
     if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
         chunks, _ = chunk_xlsx(
             file_path,
@@ -256,7 +331,8 @@ def get_chunks_from_path(
     if ext == _EXT_CSV:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
-            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                sentences_per_chunk)
         )
         chunks, _ = chunk_csv(
             file_path,
@@ -294,7 +370,8 @@ def get_chunks_from_bytes(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Chunk a document from raw bytes (e.g. an API file upload).
 
     Writes the bytes to a temporary file, runs the chunker, then deletes
@@ -324,6 +401,16 @@ def get_chunks_from_bytes(
         tmp_path = tmp.name
 
     try:
+        if list_images:
+            if ext in _CHUNKS_IMAGE_DISPATCH:
+                chunk_list, images = _CHUNKS_IMAGE_DISPATCH[ext](
+                    tmp_path, mode=mode, window_size=window_size,
+                    overlap=overlap, sentences_per_chunk=sentences_per_chunk,
+                    paragraphs_per_page=paragraphs_per_page,
+                )
+                return ChunksResult(chunks=chunk_list, images=images)
+            # Unsupported format — fall through to existing logic, wrap below
+
         if ext in (_EXT_XLSX, _EXT_XLS):
             chunks, _ = chunk_xlsx(
                 tmp_path,
@@ -332,12 +419,15 @@ def get_chunks_from_bytes(
                 window_size=window_size,
                 overlap=overlap,
             )
+            if list_images:
+                return ChunksResult(chunks=chunks, images={})
             return chunks
 
         if ext == _EXT_CSV:
             csv_mode = "row" if mode == "default" else mode
             rows_per_chunk = (
-                paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+                paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                    sentences_per_chunk)
             )
             chunks, _ = chunk_csv(
                 tmp_path,
@@ -350,6 +440,8 @@ def get_chunks_from_bytes(
                 encoding=encoding,
                 skip_empty_rows=True,
             )
+            if list_images:
+                return ChunksResult(chunks=chunks, images={})
             return chunks
 
         chunks, _ = _run_chunker(
@@ -364,6 +456,8 @@ def get_chunks_from_bytes(
     finally:
         os.unlink(tmp_path)
 
+    if list_images:
+        return ChunksResult(chunks=chunks, images={})
     return chunks
 
 
@@ -378,7 +472,8 @@ def get_chunks_from_fileobj(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Chunk from a file-like object (open file, BytesIO, spooled temp file)."""
     inferred_name = filename or getattr(file_obj, "name", None)
     if not inferred_name:
@@ -402,6 +497,7 @@ def get_chunks_from_fileobj(
         paragraphs_per_page=paragraphs_per_page,
         delimiter=delimiter,
         encoding=encoding,
+        list_images=list_images,
     )
 
 
@@ -415,7 +511,8 @@ def get_chunks_from_upload(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Chunk from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
     if not filename:
@@ -433,6 +530,7 @@ def get_chunks_from_upload(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     if hasattr(upload_file, "read"):
@@ -457,6 +555,7 @@ def get_chunks_from_upload(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     raise TypeError("upload_file must provide .file.read() or .read()")
@@ -474,7 +573,8 @@ def get_chunks_from_s3_presigned_url(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Download from a pre-signed URL and chunk the file."""
     inferred_name = filename
     if not inferred_name:
@@ -497,6 +597,7 @@ def get_chunks_from_s3_presigned_url(
         paragraphs_per_page=paragraphs_per_page,
         delimiter=delimiter,
         encoding=encoding,
+        list_images=list_images,
     )
 
 
@@ -587,7 +688,8 @@ def stream_chunks_from_path(
     if ext == _EXT_CSV:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
-            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                sentences_per_chunk)
         )
         return stream_chunk_csv(
             file_path,
@@ -716,7 +818,8 @@ def stream_chunks_from_bytes(
     if ext == _EXT_CSV:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
-            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(sentences_per_chunk)
+            paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                sentences_per_chunk)
         )
         iterator = stream_chunk_csv(
             tmp_path,
@@ -988,6 +1091,22 @@ def stream_chunks(
     )
 
 
+@overload
+def get_chunks(source, *, filename: str | None = ..., mode: str = ...,
+               window_size: int = ..., overlap: int = ...,
+               sentences_per_chunk: int = ..., paragraphs_per_page: int = ...,
+               delimiter: str | None = ..., encoding: str = ...,
+               list_images: Literal[False] = ...) -> list[dict]: ...
+
+
+@overload
+def get_chunks(source, *, filename: str | None = ..., mode: str = ...,
+               window_size: int = ..., overlap: int = ...,
+               sentences_per_chunk: int = ..., paragraphs_per_page: int = ...,
+               delimiter: str | None = ..., encoding: str = ...,
+               list_images: Literal[True]) -> ChunksResult: ...
+
+
 def get_chunks(
     source: Any,
     *,
@@ -999,7 +1118,8 @@ def get_chunks(
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
     encoding: str = "utf-8",
-) -> list[dict]:
+    list_images: bool = False,
+) -> "list[dict] | ChunksResult":
     """Unified chunking entrypoint across paths, bytes, file objects, uploads, and URLs."""
     if isinstance(source, (str, PathLike)):
         source_path = fspath(source)
@@ -1015,6 +1135,7 @@ def get_chunks(
                 paragraphs_per_page=paragraphs_per_page,
                 delimiter=delimiter,
                 encoding=encoding,
+                list_images=list_images,
             )
         return get_chunks_from_path(
             source_path,
@@ -1025,6 +1146,7 @@ def get_chunks(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     if isinstance(source, memoryview):
@@ -1046,6 +1168,7 @@ def get_chunks(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     if hasattr(source, "filename"):
@@ -1058,6 +1181,7 @@ def get_chunks(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     if hasattr(source, "read"):
@@ -1071,6 +1195,7 @@ def get_chunks(
             paragraphs_per_page=paragraphs_per_page,
             delimiter=delimiter,
             encoding=encoding,
+            list_images=list_images,
         )
 
     raise TypeError(
@@ -1079,11 +1204,13 @@ def get_chunks(
 
 
 @overload
-def get_markdown(source, *, filename: str | None = ..., list_images: Literal[False] = ...) -> str: ...
+def get_markdown(source, *, filename: str | None = ...,
+                 list_images: Literal[False] = ...) -> str: ...
 
 
 @overload
-def get_markdown(source, *, filename: str | None = ..., list_images: Literal[True]) -> MarkdownResult: ...
+def get_markdown(source, *, filename: str | None = ...,
+                 list_images: Literal[True]) -> MarkdownResult: ...
 
 
 def get_markdown(
@@ -1126,7 +1253,8 @@ def get_markdown(
     if hasattr(source, "read"):
         name = filename or getattr(source, "name", None)
         if not name:
-            raise ValueError("filename is required for file-like objects without a .name")
+            raise ValueError(
+                "filename is required for file-like objects without a .name")
         ext = _resolve_markdown_dispatch_ext(Path(name).suffix.lower())
         data = source.read()
         return _get_markdown_from_temp_data(
@@ -1139,6 +1267,7 @@ def get_markdown(
 
 
 __all__ = [
+    "ChunksResult",
     "MarkdownResult",
     "get_chunks_from_path",
     "get_chunks_from_fileobj",

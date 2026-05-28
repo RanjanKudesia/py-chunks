@@ -1,0 +1,379 @@
+use std::collections::HashMap;
+use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
+
+use quick_xml::events::Event;
+use quick_xml::name::QName;
+use quick_xml::Reader as XmlReader;
+use zip::ZipArchive;
+
+#[derive(Debug, Clone)]
+pub struct SheetImageInfo {
+    pub sheet_name: String,
+    pub sheet_index: usize,
+    pub hash_name: String,
+    pub alt_text: Option<String>,
+}
+
+/// Returns None for unsupported formats (.emf, .wmf, .tiff, etc.).
+/// Returns "{16hexchars}.{ext}" for .png/.jpg/.jpeg/.gif/.webp.
+pub fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
+    let path = zip_path.to_ascii_lowercase();
+    let ext = if path.ends_with(".png") {
+        ".png"
+    } else if path.ends_with(".jpg") {
+        ".jpg"
+    } else if path.ends_with(".jpeg") {
+        ".jpeg"
+    } else if path.ends_with(".gif") {
+        ".gif"
+    } else if path.ends_with(".webp") {
+        ".webp"
+    } else {
+        return None;
+    };
+
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}{ext}", hasher.finish()))
+}
+
+fn read_zip_entry(archive: &mut ZipArchive<File>, name: &str) -> Option<Vec<u8>> {
+    let mut entry = archive.by_name(name).ok()?;
+    let mut buf = Vec::new();
+    entry.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+fn resolve_relative_path(base_dir: &str, target: &str) -> String {
+    if target.starts_with('/') {
+        return target.trim_start_matches('/').to_string();
+    }
+    let mut parts: Vec<&str> = base_dir.split('/').collect();
+    for segment in target.split('/') {
+        match segment {
+            ".." => {
+                parts.pop();
+            }
+            "." | "" => {}
+            s => parts.push(s),
+        }
+    }
+    parts.join("/")
+}
+
+fn local_name(name: QName<'_>) -> Vec<u8> {
+    let bytes = name.as_ref();
+    let idx = bytes
+        .iter()
+        .rposition(|b| *b == b':')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    bytes[idx..].to_vec()
+}
+
+fn attr_value(attr: &quick_xml::events::attributes::Attribute<'_>) -> String {
+    String::from_utf8_lossy(attr.value.as_ref()).into_owned()
+}
+
+fn parse_sheet_drawing_targets(
+    archive: &mut ZipArchive<File>,
+    sheet_index_1based: usize,
+) -> Vec<String> {
+    let rels_path = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_index_1based);
+    let bytes = match read_zip_entry(archive, &rels_path) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+
+    let mut reader = XmlReader::from_reader(bytes.as_slice());
+    let mut buf = Vec::new();
+    let mut targets = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Err(_) => return Vec::new(),
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if local_name(e.name()).as_slice() == b"Relationship" {
+                    let mut rel_type = String::new();
+                    let mut target = String::new();
+                    for attr in e.attributes().flatten() {
+                        let key = local_name(QName(attr.key.as_ref()));
+                        if key.as_slice() == b"Type" {
+                            rel_type = attr_value(&attr);
+                        } else if key.as_slice() == b"Target" {
+                            target = attr_value(&attr);
+                        }
+                    }
+                    if rel_type.ends_with("/drawing") && !target.is_empty() {
+                        targets.push(resolve_relative_path("xl/worksheets", &target));
+                    }
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    targets
+}
+
+fn parse_drawing_image_rids(
+    archive: &mut ZipArchive<File>,
+    drawing_path: &str,
+) -> HashMap<String, String> {
+    let file_name = drawing_path.rsplit('/').next().unwrap_or("");
+    if file_name.is_empty() {
+        return HashMap::new();
+    }
+
+    let rels_path = format!("xl/drawings/_rels/{}.rels", file_name);
+    let bytes = match read_zip_entry(archive, &rels_path) {
+        Some(b) => b,
+        None => return HashMap::new(),
+    };
+
+    let mut reader = XmlReader::from_reader(bytes.as_slice());
+    let mut buf = Vec::new();
+    let mut images = HashMap::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => break,
+            Err(_) => return HashMap::new(),
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if local_name(e.name()).as_slice() == b"Relationship" {
+                    let mut id = String::new();
+                    let mut rel_type = String::new();
+                    let mut target = String::new();
+                    for attr in e.attributes().flatten() {
+                        let key = local_name(QName(attr.key.as_ref()));
+                        let value = attr_value(&attr);
+                        if key.as_slice() == b"Id" {
+                            id = value;
+                        } else if key.as_slice() == b"Type" {
+                            rel_type = value;
+                        } else if key.as_slice() == b"Target" {
+                            target = value;
+                        }
+                    }
+                    if rel_type.ends_with("/image") && !id.is_empty() && !target.is_empty() {
+                        images.insert(id, resolve_relative_path("xl/drawings", &target));
+                    }
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    images
+}
+
+fn extract_drawing_pic_rids(xml_bytes: &[u8]) -> Vec<(Option<String>, Option<String>)> {
+    let mut reader = XmlReader::from_reader(std::io::BufReader::new(xml_bytes));
+    let mut buf = Vec::new();
+
+    let mut result = Vec::new();
+    let mut in_pic = false;
+    let mut pic_rid: Option<String> = None;
+    let mut pic_alt: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                match local {
+                    b"pic" => {
+                        in_pic = true;
+                        pic_rid = None;
+                        pic_alt = None;
+                    }
+                    b"cNvPr" if in_pic && pic_alt.is_none() => {
+                        let mut descr: Option<String> = None;
+                        let mut name_val: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            let v = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            if !v.is_empty() {
+                                match al {
+                                    b"descr" => descr = Some(v),
+                                    b"name" => name_val = Some(v),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(d) = descr {
+                            pic_alt = Some(d);
+                        } else if let Some(n) = name_val {
+                            let lower = n.to_ascii_lowercase();
+                            let generic = lower.starts_with("picture ")
+                                || lower.starts_with("image ")
+                                || lower.starts_with("graphic ")
+                                || lower.starts_with("content placeholder");
+                            if !generic {
+                                pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            if al == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                match local {
+                    b"pic" => {
+                        result.push((None, None));
+                    }
+                    b"cNvPr" if in_pic && pic_alt.is_none() => {
+                        let mut descr: Option<String> = None;
+                        let mut name_val: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            let v = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            if !v.is_empty() {
+                                match al {
+                                    b"descr" => descr = Some(v),
+                                    b"name" => name_val = Some(v),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(d) = descr {
+                            pic_alt = Some(d);
+                        } else if let Some(n) = name_val {
+                            let lower = n.to_ascii_lowercase();
+                            let generic = lower.starts_with("picture ")
+                                || lower.starts_with("image ")
+                                || lower.starts_with("graphic ")
+                                || lower.starts_with("content placeholder");
+                            if !generic {
+                                pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            if al == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                if local == b"pic" && in_pic {
+                    in_pic = false;
+                    result.push((pic_rid.take(), pic_alt.take()));
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    result
+}
+
+pub fn collect_all_sheet_images(
+    file_path: &str,
+    workbook_sheet_names: &[String],
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<SheetImageInfo> {
+    let zip_file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut archive = match ZipArchive::new(zip_file) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut result = Vec::new();
+
+    for (sheet_idx, sheet_name) in workbook_sheet_names.iter().enumerate() {
+        let drawing_paths = parse_sheet_drawing_targets(&mut archive, sheet_idx + 1);
+
+        for drawing_path in drawing_paths {
+            let image_rids = parse_drawing_image_rids(&mut archive, &drawing_path);
+            if image_rids.is_empty() {
+                continue;
+            }
+
+            let xml_bytes = match read_zip_entry(&mut archive, &drawing_path) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let pic_rids = extract_drawing_pic_rids(&xml_bytes);
+            for (rid_opt, alt_opt) in pic_rids {
+                let rid = match rid_opt {
+                    Some(r) => r,
+                    None => continue,
+                };
+                let zip_path = match image_rids.get(&rid) {
+                    Some(p) => p.clone(),
+                    None => continue,
+                };
+                let img_bytes = match read_zip_entry(&mut archive, &zip_path) {
+                    Some(b) => b,
+                    None => continue,
+                };
+                let hash_name = match image_hash_name(&img_bytes, &zip_path) {
+                    Some(n) => n,
+                    None => continue,
+                };
+
+                if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                    image_out.push((hash_name.clone(), img_bytes));
+                }
+
+                result.push(SheetImageInfo {
+                    sheet_name: sheet_name.clone(),
+                    sheet_index: sheet_idx,
+                    hash_name,
+                    alt_text: alt_opt,
+                });
+            }
+        }
+    }
+
+    result
+}

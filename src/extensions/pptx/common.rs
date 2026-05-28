@@ -68,7 +68,7 @@ fn parse_slide_number(name: &str) -> Option<usize> {
 
 /// Resolves a relative path (e.g. `../notesSlides/notesSlide1.xml`) against a
 /// base directory (e.g. `ppt/slides`), returning the canonical archive path.
-fn resolve_relative_path(base_dir: &str, relative: &str) -> String {
+pub fn resolve_relative_path(base_dir: &str, relative: &str) -> String {
     let mut parts: Vec<&str> = base_dir.split('/').collect();
     for segment in relative.split('/') {
         match segment {
@@ -145,6 +145,7 @@ pub enum ContentType {
     SlidingWindow,
     Sentence,
     PageAware,
+    Image,
 }
 
 impl ContentType {
@@ -161,6 +162,7 @@ impl ContentType {
             ContentType::SlidingWindow => "sliding_window",
             ContentType::Sentence => "sentence",
             ContentType::PageAware => "page_aware",
+            ContentType::Image => "image",
         }
     }
 }
@@ -485,7 +487,13 @@ pub fn parse_presentation_sections(
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
                 let local = local_name(e.name());
                 match local.as_slice() {
-                    b"sldIdLst" => in_sld_id_lst = true,
+                    b"sldIdLst" => {
+                        if in_section_lst {
+                            in_section_sld_id_lst = true;
+                        } else {
+                            in_sld_id_lst = true;
+                        }
+                    }
                     b"sldId" if in_sld_id_lst && !in_section_lst => {
                         if let Some(id_str) = attr_value(e.attributes(), b"id") {
                             if let Ok(id) = id_str.parse::<u32>() {
@@ -503,7 +511,6 @@ pub fn parse_presentation_sections(
                         }
                         current_section_name = attr_value(e.attributes(), b"name");
                     }
-                    b"sldIdLst" if in_section_lst => in_section_sld_id_lst = true,
                     b"sldId" if in_section_sld_id_lst => {
                         if let Some(id_str) = attr_value(e.attributes(), b"id") {
                             if let Ok(id) = id_str.parse::<u32>() {
@@ -751,6 +758,286 @@ pub fn pptx_metadata(
             "total_slides": total_slides,
         }
     })
+}
+
+// ── Image extraction helpers ──────────────────────────────────────────────────
+
+/// Returns `None` for unsupported formats (.emf, .wmf, etc.).
+/// Returns `"<16hexchars>.<ext>"` for .png/.jpg/.jpeg/.gif/.webp.
+pub fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let path = zip_path.to_ascii_lowercase();
+    let ext = if path.ends_with(".png") {
+        ".png"
+    } else if path.ends_with(".jpg") {
+        ".jpg"
+    } else if path.ends_with(".jpeg") {
+        ".jpeg"
+    } else if path.ends_with(".gif") {
+        ".gif"
+    } else if path.ends_with(".webp") {
+        ".webp"
+    } else {
+        return None;
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}{ext}", hasher.finish()))
+}
+
+/// Parse a slide's .rels file and return rId → zip_path for image relationships only.
+/// E.g. `"rId2"` → `"ppt/media/image4.jpeg"`.
+pub fn parse_slide_image_rids(
+    archive: &mut PptxArchive,
+    slide_name: &str,
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let last_slash = match slide_name.rfind('/') {
+        Some(i) => i,
+        None => return HashMap::new(),
+    };
+    let dir = &slide_name[..last_slash];
+    let file = &slide_name[last_slash + 1..];
+    let rels_path = format!("{}/_rels/{}.rels", dir, file);
+
+    let rels_bytes = match read_zip_entry(archive, &rels_path) {
+        Ok(b) => b,
+        Err(_) => return HashMap::new(),
+    };
+    let content = match std::str::from_utf8(&rels_bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut images = HashMap::new();
+    for chunk in content.split("<Relationship ") {
+        if !chunk.contains("/image") {
+            continue;
+        }
+        let id = extract_attr(chunk, "Id");
+        let target = extract_attr(chunk, "Target");
+        if let (Some(id), Some(target)) = (id, target) {
+            let zip_path = resolve_relative_path(dir, &target);
+            images.insert(id, zip_path);
+        }
+    }
+    images
+}
+
+/// Extract attribute value from a `<Relationship .../>` chunk (simple string parsing).
+fn extract_attr(chunk: &str, attr: &str) -> Option<String> {
+    let needle = format!("{}=\"", attr);
+    let start = chunk.find(&needle)? + needle.len();
+    let rest = &chunk[start..];
+    let end = rest.find('"')?;
+    let val = rest[..end].trim().to_string();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+/// Scan a slide's XML for `<p:pic>` elements.
+/// Returns `Vec<(rId, alt_text)>` — one entry per picture found.
+/// `rId` comes from `<a:blip r:embed="rIdN"/>`.
+/// `alt_text` comes from `<p:cNvPr descr="..."/>` (or `name=` as fallback).
+pub fn extract_slide_pic_rids(xml_bytes: &[u8]) -> Vec<(Option<String>, Option<String>)> {
+    let mut reader = Reader::from_reader(std::io::BufReader::new(xml_bytes));
+    let mut buf = Vec::new();
+    let mut result = Vec::new();
+    let mut in_pic = false;
+    let mut pic_rid: Option<String> = None;
+    let mut pic_alt: Option<String> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                match local {
+                    b"pic" => {
+                        in_pic = true;
+                        pic_rid = None;
+                        pic_alt = None;
+                    }
+                    b"cNvPr" if in_pic && pic_alt.is_none() => {
+                        let mut descr: Option<String> = None;
+                        let mut name_val: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            let v = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            if !v.is_empty() {
+                                match al {
+                                    b"descr" => descr = Some(v),
+                                    b"name" => name_val = Some(v),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(d) = descr {
+                            pic_alt = Some(d);
+                        } else if let Some(n) = name_val {
+                            let lower = n.to_ascii_lowercase();
+                            let generic = lower.starts_with("picture ")
+                                || lower.starts_with("image ")
+                                || lower.starts_with("graphic ")
+                                || lower.starts_with("content placeholder");
+                            if !generic {
+                                pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            if al == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                match local {
+                    b"pic" => {
+                        // self-closing <p:pic/> — rare but handle it
+                        result.push((None, None));
+                    }
+                    b"cNvPr" if in_pic && pic_alt.is_none() => {
+                        let mut descr: Option<String> = None;
+                        let mut name_val: Option<String> = None;
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            let v = String::from_utf8_lossy(attr.value.as_ref())
+                                .trim()
+                                .to_string();
+                            if !v.is_empty() {
+                                match al {
+                                    b"descr" => descr = Some(v),
+                                    b"name" => name_val = Some(v),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(d) = descr {
+                            pic_alt = Some(d);
+                        } else if let Some(n) = name_val {
+                            let lower = n.to_ascii_lowercase();
+                            let generic = lower.starts_with("picture ")
+                                || lower.starts_with("image ")
+                                || lower.starts_with("graphic ")
+                                || lower.starts_with("content placeholder");
+                            if !generic {
+                                pic_alt = Some(n);
+                            }
+                        }
+                    }
+                    b"blip" if in_pic => {
+                        for attr in e.attributes().flatten() {
+                            let ak = attr.key.as_ref().to_vec();
+                            let al: &[u8] = ak.rsplit(|b| *b == b':').next().unwrap_or(&ak);
+                            if al == b"embed" {
+                                let rid = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !rid.is_empty() {
+                                    pic_rid = Some(rid);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let raw = e.name().as_ref().to_vec();
+                let local: &[u8] = raw.rsplit(|b| *b == b':').next().unwrap_or(&raw);
+                if local == b"pic" && in_pic {
+                    in_pic = false;
+                    result.push((pic_rid.take(), pic_alt.take()));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    result
+}
+
+pub struct SlideImageInfo {
+    pub slide_num: usize,
+    pub hash_name: String,
+    pub alt_text: Option<String>,
+}
+
+/// Collect all extractable images from all slides.
+/// Populates `image_out` with deduplicated (hash_name, bytes) pairs.
+/// Returns per-image-chunk info (one entry per image occurrence, including duplicates across slides).
+pub fn collect_all_slide_images(
+    archive: &mut PptxArchive,
+    slide_names: &[(usize, String)],
+    _total_slides: usize,
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<SlideImageInfo> {
+    let mut result = Vec::new();
+
+    for (slide_num, slide_name) in slide_names {
+        let image_rids = parse_slide_image_rids(archive, slide_name);
+        if image_rids.is_empty() {
+            continue;
+        }
+
+        let xml_bytes = match read_zip_entry(archive, slide_name) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        let pic_rids = extract_slide_pic_rids(&xml_bytes);
+
+        for (rid_opt, alt_opt) in pic_rids {
+            let rid = match rid_opt {
+                Some(r) => r,
+                None => continue,
+            };
+            let zip_path = match image_rids.get(&rid) {
+                Some(p) => p.clone(),
+                None => continue,
+            };
+            let img_bytes = match read_zip_entry(archive, &zip_path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let hash_name = match image_hash_name(&img_bytes, &zip_path) {
+                Some(n) => n,
+                None => continue,
+            };
+            if !image_out.iter().any(|(n, _)| n == &hash_name) {
+                image_out.push((hash_name.clone(), img_bytes));
+            }
+            result.push(SlideImageInfo {
+                slide_num: *slide_num,
+                hash_name,
+                alt_text: alt_opt,
+            });
+        }
+    }
+    result
 }
 
 // tokenize_keywords, has_keyword_overlap — re-exported from super::super::shared above.

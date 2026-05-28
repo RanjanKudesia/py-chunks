@@ -19,7 +19,9 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
   - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
 - **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (11 extensions: `.doc`, `.docx`, `.pptx`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
-- **Image extraction** for DOCX and PPTX via `get_markdown(..., list_images=True)` — returns a `MarkdownResult` with the rendered Markdown plus a `dict[str, bytes]` of every embedded image (keyed by a stable content hash; web-renderable formats only: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`)
+- **Image extraction** for DOCX, PPTX, XLSX, and HTML in two modes:
+  - `get_chunks(..., list_images=True)` — returns a `ChunksResult` with the normal chunk list plus a `dict[str, bytes]` of every embedded image; each image also appears as a dedicated `content_type="image"` chunk whose `content` is the image's hash filename. All 7 chunking modes supported for document formats; all 6 for XLSX.
+  - `get_markdown(..., list_images=True)` — returns a `MarkdownResult` with the rendered Markdown plus the same image dict. Images keyed by a stable content hash; web-renderable formats only: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`.
 - **Multiple Input Sources**: local file paths, raw `bytes` / `bytearray` / `memoryview`, file-like objects (`BytesIO`, open files), FastAPI / Starlette `UploadFile`, HTTP(S) / S3 pre-signed URLs
 - **Consistent Output Schema**: every chunk is a `dict` with `content`, `content_type`, and `metadata` keys
 - **Minimal Python dependencies**: all parsing happens in the Rust extension; PDF support uses [`pypdfium2`](https://pypi.org/project/pypdfium2/) (installed automatically), which bundles the PDFium native binary for every platform
@@ -79,12 +81,27 @@ md = get_markdown("data.csv")
 md = get_markdown("notes.txt")
 md = get_markdown(file_bytes, filename="report.pdf")  # bytes also supported
 
-# Image extraction — DOCX and PPTX only
+# Image extraction via get_chunks — DOCX, PPTX, XLSX, and HTML
+from py_chunks import ChunksResult
+result = get_chunks("report.docx", list_images=True)   # returns ChunksResult
+result = get_chunks("report.docx", mode="semantic", list_images=True)
+result = get_chunks("deck.pptx",   list_images=True)
+result = get_chunks("deck.pptx",   mode="section", list_images=True)
+result = get_chunks("data.xlsx",   list_images=True)   # all 6 XLSX modes supported
+result = get_chunks("page.html",   list_images=True)   # base64 data URIs + local file refs
+result = get_chunks("page.html",   mode="semantic", list_images=True)
+isinstance(result, ChunksResult)   # True
+result.chunks   # list of dicts — text chunks plus image chunks (content_type="image")
+result.images   # {"8c4a2b4ccec6f521.jpeg": b"...", ...}
+
+# Image extraction via get_markdown — DOCX, PPTX, XLSX, and HTML
 from py_chunks import MarkdownResult
 result = get_markdown("report.docx", list_images=True)  # returns MarkdownResult
 print(result.markdown)       # full Markdown string with ![](hash.ext) refs
 print(result.images)         # {"8c4a2b4ccec6f521.png": b"...", ...}
 result = get_markdown("deck.pptx", list_images=True)
+result = get_markdown("data.xlsx", list_images=True)    # refs added after each sheet table
+result = get_markdown("page.html", list_images=True)    # refs appended at end of markdown
 ```
 
 ---
@@ -126,6 +143,8 @@ chunks = get_chunks("file.docx", mode="page_aware",     paragraphs_per_page=15)
 | `sliding_window` | Overlapping paragraph windows. Params: `window_size` (default 3), `overlap` (default 1). `metadata` includes `window_size`, `overlap`, `window_index`, `paragraph_indices`. |
 | `sentence` | N sentences per chunk, detected without NLP. Handles common abbreviations. Param: `sentences_per_chunk` (default 3). `metadata` includes `sentences_per_chunk`, `actual_sentence_count`, `chunk_index`, `source_paragraph_index`. |
 | `page_aware` | Chunks by explicit page breaks (`w:pageBreak`), section breaks (`w:sectPr`), then paragraph count fallback. Param: `paragraphs_per_page` (default 15). `metadata` includes `page_number`, `page_break_type`, `paragraph_count`. |
+
+> **Image-aware chunking**: all 7 DOCX modes support `list_images=True`. Pass it to `get_chunks` to receive a `ChunksResult` instead of a plain list. Image chunks (one per embedded image, in document order) have `content_type="image"`, `content` equal to the image's hash filename (e.g. `"8c4a2b4ccec6f521.png"`), and metadata keys `image_name`, `alt_text`, `page_number`, and `document_metadata`. Text chunks are byte-for-byte identical to the `list_images=False` output — only extra image chunks are added.
 
 > **Streaming**: all 7 DOCX modes are supported by `stream_chunks`. `default`/`structural` use `DocxStructuralIterator`; the other five modes (`section`, `semantic`, `sliding_window`, `sentence`, `page_aware`) each have a dedicated Rust iterator that parses the document once upfront and emits chunks one at a time. Output is byte-for-byte identical to `get_chunks` for every mode.
 
@@ -229,6 +248,8 @@ for chunk in stream_chunks("deck.pptx", mode="section"):
     ...
 ```
 
+> **Image-aware chunking**: all 7 PPTX modes support `list_images=True`. Pass it to `get_chunks` to receive a `ChunksResult`. Image chunks have `content_type="image"`, `content` equal to the image's hash filename, and metadata keys `slide_number`, `image_name`, `alt_text`, and `document_metadata`. Text chunks are byte-for-byte identical to the `list_images=False` output — only extra image chunks are added. Supported image formats: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`; vector formats (`.emf`, `.wmf`) are silently skipped.
+
 > **Note**: For PPTX, `paragraphs_per_page` is interpreted as **slides per chunk** (default **5**, not 15).
 >
 > **Legacy API**: `chunk_pptx_with_strategy(path, strategy=...)` still works and is a thin wrapper around `chunk_pptx(path, mode=...)`. It is **not** re-exported at the top level — import it from the submodule:
@@ -260,6 +281,8 @@ chunks = get_chunks("readme.txt", mode="section")           # same modes for pla
 ```
 
 These three formats also support **streaming in every mode** — see the Streaming section below.
+
+> **Image-aware chunking**: HTML (`.html`, `.htm`) supports `list_images=True`. Pass it to `get_chunks` to receive a `ChunksResult`. Two image sources are supported: base64 data URIs (`data:image/...;base64,...` embedded in `src`) and local file references resolved relative to the HTML file's parent directory. Remote URLs are silently skipped. Image chunks have `content_type="image"`, `content` equal to the image's hash filename, and metadata keys `image_name`, `alt_text`, and `document_metadata`. Text chunks are byte-for-byte identical to the `list_images=False` output. `get_markdown(..., list_images=True)` appends `![alt](hash.ext)` references at the end of the Markdown string.
 
 ---
 
@@ -302,6 +325,8 @@ for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4
 | `sliding_window` | `row_window` | Overlapping windows of N rows. Params: `window_size` (default 3), `overlap` (default 1, must be `< window_size`). |
 | `page_aware` | `sheet_region` | Chunks by Excel print areas (XLSX only); falls back to the full sheet when no print area is defined. For XLS, always uses the full-sheet fallback. Param: `max_chunk_chars`. |
 | `semantic` | `semantic_group` | Detects the column with the lowest cardinality of string values, sorts by it, and groups rows sharing the same category value. Falls back to fixed-size chunking when no suitable column is found. Param: `rows_per_chunk` (used for the fallback). |
+
+**Image-aware chunking**: all 6 XLSX modes support `list_images=True`. Pass it to `get_chunks` to receive a `ChunksResult`. Image chunks have `content_type="image"`, `content` equal to the image hash filename, and metadata keys `sheet_name`, `sheet_index`, `image_name`, and `alt_text`. XLS files return `images={}`.
 
 **Parameters accepted by `chunk_xlsx` and `stream_chunk_xlsx`:**
 
@@ -409,8 +434,8 @@ md = get_markdown(BytesIO(data), filename="document.pdf")
 | `.doc` | H1 → `#`, H2–H3 → `##`, H4+ → `###`; lists → `- item`; each table paragraph → pipe row with `\| --- \|` separator; page breaks → `---`; plain paragraphs as-is |
 | `.pptx` | Presentation title → `# Title`; PPTX sections → `# Section Name`; each slide → `## Slide N: Title` (or `## Slide N`); paragraphs as plain text; unordered bullets (`- item`) and ordered bullets (`1. item`) with per-level indentation; pipe tables; speaker notes as `> **Notes:** …`; slides/sections separated by `---`. Images: rendered as `[Image: alt]` by default; use `list_images=True` to get `![](hash.ext)` refs and the raw image bytes in `MarkdownResult.images` |
 | `.pdf` | Headings inferred from font size vs document average → `#` / `##` / `###`; bullet lists preserved or normalized to `- item`; tables detected by tab/multi-space alignment → pipe tables; page boundaries → `---` |
-| `.html`, `.htm` | H1–H6 → `#`–`######`; paragraphs as plain text; ordered lists → `1. item`; unordered lists → `- item`; code blocks → fenced ` ``` `; pipe tables with auto-detected header row; `\|` in cells escaped |
-| `.xlsx`, `.xls` | Each non-empty sheet → `## SheetName` heading + pipe table (auto-detected header row); sheets separated by `---`; `\|` in cells escaped |
+| `.html`, `.htm` | H1–H6 → `#`–`######`; paragraphs as plain text; ordered lists → `1. item`; unordered lists → `- item`; code blocks → fenced ` ``` `; pipe tables with auto-detected header row; `\|` in cells escaped. Images: ignored by default; use `list_images=True` to extract base64 data URIs and local file references as `![alt](hash.ext)` refs appended at the end, plus raw bytes in `MarkdownResult.images` |
+| `.xlsx`, `.xls` | Each non-empty sheet → `## SheetName` heading + pipe table; sheets separated by `---`. Images: ignored by default; use `list_images=True` to get `![](hash.ext)` refs after each sheet table and raw bytes in `MarkdownResult.images` (XLSX only; XLS returns `images={}`). |
 | `.csv` | Single pipe table; first row = header with `\| --- \|` separator; `\|` in cells escaped; empty rows skipped; delimiter auto-detected or manually set; accepts `delimiter` and `encoding` params — see `csv_to_markdown` below |
 | `.md` | Returned as-is (already Markdown — no transformation) |
 | `.txt` | Returned as-is (plain text — no transformation) |
@@ -429,22 +454,40 @@ get_markdown(source, *, filename: str | None = None, list_images: bool = True) -
 |---|---|---|
 | `source` | str, Path, bytes, bytearray, memoryview, file-like | Document source. Local file path, raw bytes, or file-like object. |
 | `filename` | str \| None | Required when source is `bytes`, `bytearray`, `memoryview`, or a file-like object without a `.name` attribute. |
-| `list_images` | bool | `False` (default) returns a plain `str`. `True` returns a `MarkdownResult`. Image extraction is only active for `.docx` and `.pptx`; all other formats return an empty `images` dict. |
+| `list_images` | bool | `False` (default) returns a plain `str`. `True` returns a `MarkdownResult`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; other formats return an empty `images` dict. |
 
 **Return types**
 
-`list_images=False` (default) → `str` — the full document as a Markdown string.
+`get_chunks` with `list_images=False` (default) → `list[dict]` — the chunk list as usual.
 
-`list_images=True` → `MarkdownResult` — a dataclass with two fields:
+`get_chunks` with `list_images=True` → `ChunksResult` — a dataclass with two fields:
+
+```python
+@dataclass
+class ChunksResult:
+    chunks: list[dict]        # all chunks: image chunks first, then text chunks
+    images: dict[str, bytes]  # {hash_filename: raw_bytes} — populated for .docx, .pptx, .xlsx, .html/.htm
+```
+
+Image chunks inside `ChunksResult.chunks` have `content_type="image"`, `content` equal to the hash filename (e.g. `"8c4a2b4ccec6f521.jpeg"`), and format-specific metadata:
+
+- **DOCX**: `image_name`, `alt_text`, `page_number`, `document_metadata`
+- **PPTX**: `slide_number`, `image_name`, `alt_text`, `document_metadata`
+- **XLSX**: `sheet_name`, `sheet_index`, `image_name`, `alt_text`
+- **HTML**: `image_name`, `alt_text`, `document_metadata` (`source_type: "html"`)
+
+`get_markdown` with `list_images=False` (default) → `str` — the full document as a Markdown string.
+
+`get_markdown` with `list_images=True` → `MarkdownResult` — a dataclass with two fields:
 
 ```python
 @dataclass
 class MarkdownResult:
     markdown: str             # full Markdown string; images referenced as ![](hash.ext)
-    images: dict[str, bytes]  # {filename: raw_bytes} — only populated for .docx and .pptx
+    images: dict[str, bytes]  # {filename: raw_bytes} — populated for .docx, .pptx, .xlsx, .html/.htm
 ```
 
-**Image extraction details (DOCX / PPTX)**
+**Image extraction details (DOCX / PPTX / XLSX / HTML)**
 
 - Each embedded image is hashed (content hash, not path) and named `{16-char hex}.{ext}`, e.g. `8c4a2b4ccec6f521.png`.
 - The same hash means the same file: if an image appears multiple times in the document it is stored once in `images` but referenced at every occurrence in `markdown`.
@@ -631,7 +674,8 @@ get_chunks(
     overlap: int = 1,
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
-) -> list[dict]
+    list_images: bool = False,
+) -> list[dict] | ChunksResult
 ```
 
 ```python
@@ -662,14 +706,15 @@ get_markdown(
 |---|---|---|---|
 | `source` | str, Path, bytes, file-like, upload, URL | — | Document source. Auto-detected. (`get_markdown` does not support URLs.) |
 | `filename` | str \| None | None | Required when source is `bytes` or a file object without a `.name` attribute. |
-| `list_images` | bool | `False` | (`get_markdown` only) When `True`, returns a `MarkdownResult` instead of `str`. Image bytes extracted for `.docx` and `.pptx` only. |
+| `list_images` | bool | `False` | (`get_markdown` only) When `True`, returns a `MarkdownResult` instead of `str`. Image bytes extracted for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; other formats return an empty `images` dict. |
 | `mode` | str | `"default"` | Chunking mode. Applies to **every** supported format (PDF, DOCX, DOC, PPTX, MD, HTML, TXT). One of `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`. |
 | `window_size` | int | 3 | Number of blocks per window (`sliding_window` mode). Must be `> 0`. |
 | `overlap` | int | 1 | Overlapping blocks between windows (`sliding_window` mode). Must be `< window_size`. |
 | `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. |
 | `paragraphs_per_page` | int | 15 | Block / paragraph quota before a page flush (`page_aware` mode). Must be `> 0`. For **PPTX** this means *slides per chunk* and the format-level default is `5`. |
+| `list_images` | bool | `False` | (`get_chunks` only) When `True`, returns a `ChunksResult` instead of `list[dict]`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; all other formats return an empty `images` dict. |
 
-**Returns** — `list[dict]` (batch) or `Iterator[dict]` (streaming) or `str` / `MarkdownResult` (`get_markdown`). Each chunk dict:
+**Returns** — `list[dict]` (batch, `list_images=False`) or `ChunksResult` (batch, `list_images=True`) or `Iterator[dict]` (streaming) or `str` / `MarkdownResult` (`get_markdown`). Each chunk dict:
 
 ```python
 {
@@ -697,13 +742,13 @@ Each format also has a direct module that returns `(chunks, timing)`, where `tim
 
 ```python
 from py_chunks.chunkers.pdf  import chunk_pdf,  stream_chunk_pdf,  pdf_to_markdown
-from py_chunks.chunkers.docx import chunk_docx, stream_chunk_docx, docx_to_markdown, docx_to_markdown_with_images
+from py_chunks.chunkers.docx import chunk_docx, chunk_docx_with_images, stream_chunk_docx, docx_to_markdown, docx_to_markdown_with_images
 from py_chunks.chunkers.doc  import chunk_doc,  stream_chunk_doc,  doc_to_markdown
-from py_chunks.chunkers.pptx import chunk_pptx, stream_chunk_pptx, chunk_pptx_with_strategy, pptx_to_markdown, pptx_to_markdown_with_images
-from py_chunks.chunkers.html import chunk_html, stream_chunk_html, html_to_markdown
+from py_chunks.chunkers.pptx import chunk_pptx, chunk_pptx_with_images, stream_chunk_pptx, chunk_pptx_with_strategy, pptx_to_markdown, pptx_to_markdown_with_images
+from py_chunks.chunkers.html import chunk_html, chunk_html_with_images, stream_chunk_html, html_to_markdown, html_to_markdown_with_images
 from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md,   md_to_markdown
 from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt,  txt_to_markdown
-from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx, xlsx_to_markdown  # handles both .xlsx and .xls
+from py_chunks.chunkers.xlsx import chunk_xlsx, chunk_xlsx_with_images, stream_chunk_xlsx, xlsx_to_markdown, xlsx_to_markdown_with_images  # handles both .xlsx and .xls
 from py_chunks.chunkers.csv  import chunk_csv,  stream_chunk_csv,  csv_to_markdown
 
 # Batch with timing
@@ -764,11 +809,23 @@ md = doc_to_markdown("legacy.doc")            # DOC binary → Markdown (heading
 md = pdf_to_markdown("paper.pdf")             # PDF → Markdown (headings by font size, lists, tables, page separators)
 md = pptx_to_markdown("deck.pptx")           # PPTX → Markdown (title, sections, slides as ##, notes as blockquote)
 
-# Image-aware Markdown conversion (DOCX and PPTX only)
+# Image-aware chunking (DOCX, PPTX, HTML) — all 7 modes, returns (chunks, images)
+chunks, images = chunk_docx_with_images("report.docx")                                # default/structural
+chunks, images = chunk_docx_with_images("report.docx", mode="semantic")
+chunks, images = chunk_docx_with_images("report.docx", mode="sliding_window", window_size=3, overlap=1)
+chunks, images = chunk_pptx_with_images("deck.pptx")                                  # default/structural
+chunks, images = chunk_pptx_with_images("deck.pptx", mode="section")
+chunks, images = chunk_pptx_with_images("deck.pptx", mode="page_aware", paragraphs_per_page=5)
+chunks, images = chunk_html_with_images("page.html")                                  # default/structural
+chunks, images = chunk_html_with_images("page.html", mode="semantic")
+# images: dict[str, bytes] — same as ChunksResult.images from get_chunks(list_images=True)
+
+# Image-aware Markdown conversion (DOCX, PPTX, HTML)
 md, images = docx_to_markdown_with_images("report.docx")  # images: dict[str, bytes]
 md, images = pptx_to_markdown_with_images("deck.pptx")
+md, images = html_to_markdown_with_images("page.html")     # base64 + local-file images
 # Each key in `images` is a content-hashed filename (e.g. "8c4a2b4ccec6f521.png");
-# the same key appears as ![](8c4a2b4ccec6f521.png) in the markdown string.
+# the same key appears as ![alt](8c4a2b4ccec6f521.png) in the markdown string.
 md = html_to_markdown("page.html")            # HTML → Markdown (H1-H6, lists, tables, code blocks)
 md = xlsx_to_markdown("data.xlsx")            # each sheet → ## heading + pipe table, separated by ---
 md = csv_to_markdown("data.csv")              # pipe table, first row = header
@@ -815,6 +872,7 @@ md = md_to_markdown("readme.md")              # returned as-is
 | `sheet_region` | XLSX/XLS: print area or full sheet (`page_aware` mode) |
 | `semantic_group` | XLSX/XLS: category-grouped rows or fallback fixed-size group (`semantic` mode) |
 | `row_group` | CSV: N consecutive data rows (`row`, `default`, `page_aware` modes) |
+| `image` | Embedded image extracted from DOCX, PPTX, XLSX, or HTML when `list_images=True`; `content` is the image's hash filename (e.g. `"8c4a2b4ccec6f521.png"`), bytes are in `ChunksResult.images` |
 
 ### Metadata fields by mode
 
@@ -902,12 +960,49 @@ for path in ["report.docx", "legacy.doc", "deck.pptx", "paper.pdf",
     print(md[:500])
 ```
 
-### Extract images from DOCX or PPTX
+### Extract images from DOCX, PPTX, XLSX, or HTML
+
+Two APIs are available depending on whether you want chunks or Markdown.
+
+#### Via `get_chunks` — receive image chunks alongside text chunks
+
+```python
+from py_chunks import get_chunks, ChunksResult
+
+# Works for all 7 modes on DOCX, PPTX, and HTML; all 6 modes on XLSX
+result = get_chunks("report.docx", list_images=True)
+result = get_chunks("report.docx", mode="semantic", list_images=True)
+result = get_chunks("deck.pptx",   list_images=True)
+result = get_chunks("deck.pptx",   mode="section", list_images=True)
+result = get_chunks("data.xlsx",   list_images=True)
+result = get_chunks("page.html",   list_images=True)   # base64 data URIs + local file refs
+result = get_chunks("page.html",   mode="semantic", list_images=True)
+
+assert isinstance(result, ChunksResult)
+
+# Image bytes keyed by content-hash filename
+for name, data in result.images.items():
+    print(name, len(data))   # e.g. "8c4a2b4ccec6f521.jpeg  42891"
+
+# Image chunks appear in result.chunks with content_type="image"
+image_chunks = [c for c in result.chunks if c["content_type"] == "image"]
+for chunk in image_chunks:
+    print(chunk["content"])                    # hash filename — key into result.images
+    print(chunk["metadata"]["alt_text"])       # alt text from the document
+    # DOCX also has: page_number
+    # PPTX also has: slide_number
+    # XLSX also has: sheet_name, sheet_index
+    # HTML also has: document_metadata (source_type: "html")
+
+# Text chunks are byte-for-byte identical to list_images=False
+text_chunks = [c for c in result.chunks if c["content_type"] != "image"]
+```
+
+#### Via `get_markdown` — receive Markdown with image references
 
 ```python
 from py_chunks import get_markdown, MarkdownResult
 
-# get_markdown with list_images=True returns a MarkdownResult
 result = get_markdown("report.docx", list_images=True)
 assert isinstance(result, MarkdownResult)
 
@@ -922,17 +1017,23 @@ out.mkdir(exist_ok=True)
 for name, data in result.images.items():
     (out / name).write_bytes(data)
 
-# Works the same for PPTX
+# Works the same for PPTX, XLSX, and HTML
 result = get_markdown("deck.pptx", list_images=True)
+result = get_markdown("data.xlsx", list_images=True)   # refs appended after each sheet table
+result = get_markdown("page.html", list_images=True)   # refs appended at end of document
 
 # Also works from bytes or file-like objects
 data = open("report.docx", "rb").read()
 result = get_markdown(data, filename="report.docx", list_images=True)
 ```
 
-> **Supported image formats**: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. Vector/metafile formats (`.emf`, `.wmf`, etc.) are silently skipped — they are not renderable in Markdown or browser contexts.
+> **Supported image formats**: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. Vector/metafile formats (`.emf`, `.wmf`, etc.) are silently skipped — they are not renderable in browser contexts.
 >
-> **Deduplication**: if the same image appears multiple times in a document, it is stored once in `images` but referenced at every occurrence in `markdown`.
+> **HTML image sources**: base64 data URIs (`data:image/...;base64,...`) are decoded inline; local file references are resolved relative to the HTML file's parent directory; remote URLs are silently skipped.
+>
+> **Deduplication**: if the same image appears multiple times in a document, it is stored once in `images` but an image chunk is emitted at each occurrence (for `get_chunks`) or referenced at each occurrence in `markdown` (for `get_markdown`).
+>
+> **Text parity guarantee**: non-image chunks from `list_images=True` are byte-for-byte identical to the output of `list_images=False` for every mode and every supported format.
 
 ### Streaming a large PDF section-by-section
 

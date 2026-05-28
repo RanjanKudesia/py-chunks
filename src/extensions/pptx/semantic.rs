@@ -1,6 +1,6 @@
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 use serde_json::json;
@@ -13,15 +13,23 @@ use super::super::shared::{
     REFERENCE_STARTS, SHORT_PARA_CHARS, TRANSITION_BREAKS,
 };
 use super::common::{
-    collect_slide_names, has_keyword_overlap, open_pptx, parse_presentation_sections, read_all_slides,
-    tokenize_keywords, ChunkRecordInput, ContentType, PptxArchive,
+    collect_all_slide_images, collect_slide_names, has_keyword_overlap, open_pptx,
+    parse_presentation_sections, read_all_slides, tokenize_keywords, ChunkRecordInput, ContentType,
+    PptxArchive,
 };
 
 const MAX_SEMANTIC_CHARS: usize = 1500;
 
 const CONCLUSIVE_ENDINGS: &[&str] = &[
-    "in summary", "to summarize", "in conclusion", "to conclude",
-    "to wrap up", "in closing", "overall", "that's all", "thank you",
+    "in summary",
+    "to summarize",
+    "in conclusion",
+    "to conclude",
+    "to wrap up",
+    "in closing",
+    "overall",
+    "that's all",
+    "thank you",
 ];
 
 fn ends_conclusive_phrase(text: &str) -> bool {
@@ -75,17 +83,31 @@ impl SemAccum {
         self.ends_with_definition_label =
             unit.text.len() <= 80 && unit.text.trim_end().ends_with(':');
         self.ends_with_conclusive = ends_conclusive_phrase(&unit.text);
-        let SlideUnit { slide_num, slide_title, section_heading, text, keywords } = unit;
+        let SlideUnit {
+            slide_num,
+            slide_title,
+            section_heading,
+            text,
+            keywords,
+        } = unit;
         self.keywords.extend(keywords);
         self.merge_reasons.push(reason);
         self.units.push(SlideUnit {
-            slide_num, slide_title, section_heading,
-            text, keywords: HashSet::new(),
+            slide_num,
+            slide_title,
+            section_heading,
+            text,
+            keywords: HashSet::new(),
         });
     }
 
     fn finalize(self, chunk_index: usize, total_slides: usize) -> ChunkRecordInput {
-        let content = self.units.iter().map(|u| u.text.as_str()).collect::<Vec<_>>().join("\n\n");
+        let content = self
+            .units
+            .iter()
+            .map(|u| u.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let first_slide = self.units[0].slide_num;
         let last_slide = self.units.last().unwrap().slide_num;
         let slide_count = self.units.len();
@@ -96,8 +118,14 @@ impl SemAccum {
             ("single_unit", vec!["single_unit"])
         } else {
             let mut counts: HashMap<&'static str, usize> = HashMap::new();
-            for &r in &self.merge_reasons { *counts.entry(r).or_default() += 1; }
-            let p = counts.iter().max_by_key(|(_, v)| *v).map(|(k, _)| *k).unwrap_or("keyword_overlap");
+            for &r in &self.merge_reasons {
+                *counts.entry(r).or_default() += 1;
+            }
+            let p = counts
+                .iter()
+                .max_by_key(|(_, v)| *v)
+                .map(|(k, _)| *k)
+                .unwrap_or("keyword_overlap");
             (p, self.merge_reasons)
         };
         ChunkRecordInput {
@@ -120,19 +148,43 @@ impl SemAccum {
 }
 
 fn decide_merge(text: &str, accum: &SemAccum, bkws: &HashSet<String>) -> Option<&'static str> {
-    if accum.char_count + text.len() + 2 > MAX_SEMANTIC_CHARS { return None; }
-    if accum.ends_with_conclusive { return None; }
+    if accum.char_count + text.len() + 2 > MAX_SEMANTIC_CHARS {
+        return None;
+    }
+    if accum.ends_with_conclusive {
+        return None;
+    }
     let t = text.trim_start();
-    if TRANSITION_BREAKS.iter().any(|s| ci_starts_with(t, s)) { return None; }
-    if REFERENCE_STARTS.iter().any(|s| ci_starts_with(t, s)) { return Some("reference_continuity"); }
-    if ELABORATION_STARTS.iter().any(|s| ci_starts_with(t, s)) { return Some("elaboration"); }
-    if EXAMPLE_STARTS.iter().any(|s| ci_starts_with(t, s)) { return Some("example"); }
-    if CAUSE_EFFECT_STARTS.iter().any(|s| ci_starts_with(t, s)) { return Some("cause_effect"); }
-    if CONTRAST_CONTINUATION.iter().any(|s| ci_starts_with(t, s)) { return Some("contrast_continuation"); }
-    if accum.ends_with_question { return Some("question_answer"); }
-    if accum.ends_with_definition_label && text.len() > 60 { return Some("definition_expansion"); }
-    if text.len() <= SHORT_PARA_CHARS { return Some("short_paragraph"); }
-    if has_keyword_overlap(&accum.keywords, bkws) { return Some("keyword_overlap"); }
+    if TRANSITION_BREAKS.iter().any(|s| ci_starts_with(t, s)) {
+        return None;
+    }
+    if REFERENCE_STARTS.iter().any(|s| ci_starts_with(t, s)) {
+        return Some("reference_continuity");
+    }
+    if ELABORATION_STARTS.iter().any(|s| ci_starts_with(t, s)) {
+        return Some("elaboration");
+    }
+    if EXAMPLE_STARTS.iter().any(|s| ci_starts_with(t, s)) {
+        return Some("example");
+    }
+    if CAUSE_EFFECT_STARTS.iter().any(|s| ci_starts_with(t, s)) {
+        return Some("cause_effect");
+    }
+    if CONTRAST_CONTINUATION.iter().any(|s| ci_starts_with(t, s)) {
+        return Some("contrast_continuation");
+    }
+    if accum.ends_with_question {
+        return Some("question_answer");
+    }
+    if accum.ends_with_definition_label && text.len() > 60 {
+        return Some("definition_expansion");
+    }
+    if text.len() <= SHORT_PARA_CHARS {
+        return Some("short_paragraph");
+    }
+    if has_keyword_overlap(&accum.keywords, bkws) {
+        return Some("keyword_overlap");
+    }
     None
 }
 
@@ -140,16 +192,26 @@ fn decide_merge(text: &str, accum: &SemAccum, bkws: &HashSet<String>) -> Option<
 /// Falls back to an empty map when no XML sections are defined.
 fn build_section_map(archive: &mut PptxArchive, total_slides: usize) -> HashMap<usize, String> {
     let mut map = HashMap::new();
-    let Ok(sections) = parse_presentation_sections(archive) else { return map; };
-    if sections.is_empty() { return map; }
+    let Ok(sections) = parse_presentation_sections(archive) else {
+        return map;
+    };
+    if sections.is_empty() {
+        return map;
+    }
     let mut slide_to_section: HashMap<usize, String> = HashMap::new();
     for (name, positions) in &sections {
-        for &pos in positions { slide_to_section.insert(pos, name.clone()); }
+        for &pos in positions {
+            slide_to_section.insert(pos, name.clone());
+        }
     }
     let mut current: Option<String> = None;
     for i in 1..=total_slides {
-        if let Some(s) = slide_to_section.get(&i) { current = Some(s.clone()); }
-        if let Some(ref s) = current { map.insert(i, s.clone()); }
+        if let Some(s) = slide_to_section.get(&i) {
+            current = Some(s.clone());
+        }
+        if let Some(ref s) = current {
+            map.insert(i, s.clone());
+        }
     }
     map
 }
@@ -157,7 +219,9 @@ fn build_section_map(archive: &mut PptxArchive, total_slides: usize) -> HashMap<
 pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, String> {
     let mut archive = open_pptx(bytes)?;
     let slide_names = collect_slide_names(&archive);
-    if slide_names.is_empty() { return Err("No slides found".to_string()); }
+    if slide_names.is_empty() {
+        return Err("No slides found".to_string());
+    }
     let total_slides = slide_names.len();
 
     let section_map = build_section_map(&mut archive, total_slides);
@@ -171,12 +235,17 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
                  result: &mut Vec<ChunkRecordInput>,
                  ci: &mut usize,
                  total: usize| {
-        if let Some(a) = accum.take() { result.push(a.finalize(*ci, total)); *ci += 1; }
+        if let Some(a) = accum.take() {
+            result.push(a.finalize(*ci, total));
+            *ci += 1;
+        }
     };
 
     for (slide_num, slide) in read_all_slides(&mut archive, &slide_names)? {
         // Override section from XML section map if present
-        if let Some(sec) = section_map.get(&slide_num) { current_section = Some(sec.clone()); }
+        if let Some(sec) = section_map.get(&slide_num) {
+            current_section = Some(sec.clone());
+        }
 
         // Section-divider slides (title-only) flush the accumulator and act as
         // explicit section headings for all following slides.
@@ -207,7 +276,9 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
         }
 
         let text = slide.all_text();
-        if text.is_empty() { continue; }
+        if text.is_empty() {
+            continue;
+        }
         let bkws = tokenize_keywords(&text);
         let reason = accum.as_ref().and_then(|a| decide_merge(&text, a, &bkws));
         let unit = SlideUnit {
@@ -218,7 +289,9 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
             keywords: bkws,
         };
         match reason {
-            Some(reason) => { accum.as_mut().unwrap().push(unit, reason); }
+            Some(reason) => {
+                accum.as_mut().unwrap().push(unit, reason);
+            }
             None => {
                 flush(&mut accum, &mut result, &mut chunk_index, total_slides);
                 accum = Some(SemAccum::new(unit));
@@ -226,14 +299,18 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
         }
     }
     flush(&mut accum, &mut result, &mut chunk_index, total_slides);
-    if result.is_empty() { return Err("No semantic chunks generated".to_string()); }
+    if result.is_empty() {
+        return Err("No semantic chunks generated".to_string());
+    }
     Ok(result)
 }
 
 #[pyfunction]
 pub fn chunk_pptx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     if !file_path.to_ascii_lowercase().ends_with(".pptx") {
-        return Err(PyValueError::new_err(format!("Expected .pptx file path, got: {file_path}")));
+        return Err(PyValueError::new_err(format!(
+            "Expected .pptx file path, got: {file_path}"
+        )));
     }
     let bytes =
         fs::read(file_path).map_err(|e| PyIOError::new_err(format!("Failed to read PPTX: {e}")))?;
@@ -256,8 +333,70 @@ pub fn chunk_pptx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject
     Ok(result.into_any().unbind())
 }
 
+#[pyfunction]
+pub fn chunk_pptx_semantic_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+        return Err(PyValueError::new_err(format!(
+            "Expected .pptx file path, got: {file_path}"
+        )));
+    }
+    let bytes =
+        fs::read(file_path).map_err(|e| PyIOError::new_err(format!("Failed to read PPTX: {e}")))?;
+
+    let mut archive =
+        open_pptx(&bytes).map_err(|e| PyRuntimeError::new_err(format!("PPTX zip error: {e}")))?;
+    let slide_names = collect_slide_names(&archive);
+    let total_slides = slide_names.len();
+    let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
+    let image_infos =
+        collect_all_slide_images(&mut archive, &slide_names, total_slides, &mut image_out);
+
+    let mut chunk_list: Vec<PyObject> = image_infos
+        .into_iter()
+        .map(|info| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", &info.hash_name)?;
+            dict.set_item("content_type", "image")?;
+            dict.set_item(
+                "metadata",
+                pythonize(
+                    py,
+                    &json!({
+                        "slide_number": info.slide_num,
+                        "image_name": info.hash_name,
+                        "alt_text": info.alt_text,
+                        "document_metadata": { "source_type": "pptx", "total_slides": total_slides }
+                    }),
+                )?,
+            )?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+
+    let chunks_raw = build_semantic_chunks(&bytes)
+        .map_err(|e| PyRuntimeError::new_err(format!("PPTX semantic chunking failed: {e}")))?;
+    for c in chunks_raw {
+        let dict = PyDict::new_bound(py);
+        dict.set_item("content", &c.content)?;
+        dict.set_item("content_type", c.content_type.as_str())?;
+        dict.set_item("metadata", pythonize(py, &c.metadata)?)?;
+        chunk_list.push(dict.into_any().unbind());
+    }
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((chunk_list, image_out_py))
+}
+
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_pptx_semantic, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pptx_semantic_with_images, m)?)?;
     Ok(())
 }
 
@@ -332,12 +471,25 @@ mod tests {
     fn keyword_overlap_merges_adjacent_slides() {
         // Two slides sharing the keyword 'distributed' → should merge
         let bytes = make_pptx(&[
-            ("Slide One", "The distributed architecture handles partitions."),
-            ("Slide Two", "Distributed systems require careful coordination."),
+            (
+                "Slide One",
+                "The distributed architecture handles partitions.",
+            ),
+            (
+                "Slide Two",
+                "Distributed systems require careful coordination.",
+            ),
         ]);
         let chunks = build_semantic_chunks(&bytes).unwrap();
-        let semantic: Vec<_> = chunks.iter().filter(|c| c.content_type.as_str() == "semantic").collect();
-        assert_eq!(semantic.len(), 1, "keyword overlap should merge the two slides");
+        let semantic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.content_type.as_str() == "semantic")
+            .collect();
+        assert_eq!(
+            semantic.len(),
+            1,
+            "keyword overlap should merge the two slides"
+        );
         assert_eq!(semantic[0].metadata["slide_count"], 2);
     }
 
@@ -349,8 +501,15 @@ mod tests {
             ("Next Topic", "This is a completely new subject area."),
         ]);
         let chunks = build_semantic_chunks(&bytes).unwrap();
-        let semantic: Vec<_> = chunks.iter().filter(|c| c.content_type.as_str() == "semantic").collect();
-        assert_eq!(semantic.len(), 2, "conclusive ending should flush accumulator");
+        let semantic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.content_type.as_str() == "semantic")
+            .collect();
+        assert_eq!(
+            semantic.len(),
+            2,
+            "conclusive ending should flush accumulator"
+        );
     }
 
     #[test]
@@ -361,7 +520,10 @@ mod tests {
         ]);
         let chunks = build_semantic_chunks(&bytes).unwrap();
         // At minimum the first semantic chunk should report slide range starting at 1
-        let semantic: Vec<_> = chunks.iter().filter(|c| c.content_type.as_str() == "semantic").collect();
+        let semantic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.content_type.as_str() == "semantic")
+            .collect();
         assert!(!semantic.is_empty());
         let range = semantic[0].metadata["slide_range"].as_array().unwrap();
         assert_eq!(range[0].as_u64().unwrap(), 1);
@@ -384,7 +546,9 @@ mod tests {
     fn ends_conclusive_phrase_detects_summary_endings() {
         assert!(ends_conclusive_phrase("We covered everything in summary"));
         assert!(ends_conclusive_phrase("Thank you"));
-        assert!(ends_conclusive_phrase("That concludes our presentation overall"));
+        assert!(ends_conclusive_phrase(
+            "That concludes our presentation overall"
+        ));
     }
 
     #[test]
@@ -397,12 +561,16 @@ mod tests {
     fn max_semantic_chars_prevents_enormous_merged_chunk() {
         // Two slides each with ~800 chars of text → combined > 1500 → should not merge
         let long_body = "word content here ".repeat(45); // ~810 chars
-        let bytes = make_pptx(&[
-            ("Slide One", &long_body),
-            ("Slide Two", &long_body),
-        ]);
+        let bytes = make_pptx(&[("Slide One", &long_body), ("Slide Two", &long_body)]);
         let chunks = build_semantic_chunks(&bytes).unwrap();
-        let semantic: Vec<_> = chunks.iter().filter(|c| c.content_type.as_str() == "semantic").collect();
-        assert_eq!(semantic.len(), 2, "oversized pair should remain as two chunks");
+        let semantic: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.content_type.as_str() == "semantic")
+            .collect();
+        assert_eq!(
+            semantic.len(),
+            2,
+            "oversized pair should remain as two chunks"
+        );
     }
 }

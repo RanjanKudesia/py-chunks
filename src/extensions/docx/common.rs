@@ -6,6 +6,9 @@
 //! `parse_docx_indexed_paragraphs` function that replaces the previously
 //! duplicated walkers in `sliding_window.rs` and `sentence.rs`.
 
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read};
 
 use quick_xml::events::Event;
@@ -291,6 +294,118 @@ pub(super) fn parse_docx_paragraph_events(bytes: &[u8]) -> Result<Vec<ParagraphE
     Ok(events)
 }
 
+/// Mixed stream item returned by [`parse_docx_paragraph_events_with_images`].
+/// Text paragraphs are wrapped in `Para`; image blocks become `Image`
+/// regardless of their alt-text length (the length filter applies only to text).
+#[derive(Debug, Clone)]
+pub(super) enum ParaOrImage {
+    Para(ParagraphEvent),
+    Image {
+        rid: Option<String>,
+        alt: Option<String>,
+        signal: PageBreakSignal,
+    },
+}
+
+/// Image-aware variant of [`parse_docx_paragraph_events`].
+///
+/// Text paragraphs: identical filtering/normalization as the original
+/// (>= MIN_PARAGRAPH_CHARS). Page-break signal promotion for short text
+/// paragraphs also works the same.
+///
+/// Image blocks: always emitted as `ParaOrImage::Image` regardless of
+/// alt-text length. The signal is captured in the Image variant so that
+/// page_aware mode can detect page breaks on image-carrying paragraphs.
+pub(super) fn parse_docx_paragraph_events_with_images(
+    bytes: &[u8],
+) -> Result<Vec<ParaOrImage>, String> {
+    let blocks = parse_docx_blocks(bytes)?;
+    let mut items: Vec<ParaOrImage> = Vec::with_capacity(blocks.len());
+
+    for block in blocks {
+        let heading_level = match block.kind {
+            DocxBlockKind::Paragraph => {
+                docx_heading_level(block.heading_style.as_deref(), block.outline_level)
+            }
+            DocxBlockKind::Table => None,
+        };
+        let is_heading = heading_level.is_some();
+        let is_list = matches!(block.kind, DocxBlockKind::Paragraph) && block.is_list;
+
+        let signal = if block.page_break {
+            PageBreakSignal::Explicit
+        } else if block.section_break {
+            PageBreakSignal::Section
+        } else if block.rendered_page_break {
+            PageBreakSignal::Rendered
+        } else {
+            PageBreakSignal::None
+        };
+
+        match block.kind {
+            DocxBlockKind::Paragraph => {
+                let collapsed = collapse_whitespace(&block.text);
+                let normalized = if !collapsed.is_empty() {
+                    collapsed
+                } else if block.has_drawing {
+                    image_placeholder(block.image_alt.as_deref())
+                } else {
+                    String::new()
+                };
+
+                if normalized.len() >= MIN_PARAGRAPH_CHARS {
+                    items.push(ParaOrImage::Para(ParagraphEvent {
+                        text: normalized,
+                        signal,
+                        is_heading,
+                        heading_level,
+                        is_list,
+                        is_table: false,
+                    }));
+                } else if !matches!(signal, PageBreakSignal::None) {
+                    if let Some(ParaOrImage::Para(last)) = items.last_mut() {
+                        if matches!(last.signal, PageBreakSignal::None) {
+                            last.signal = signal;
+                        }
+                    }
+                }
+
+                if block.has_drawing {
+                    items.push(ParaOrImage::Image {
+                        rid: block.image_rid,
+                        alt: block.image_alt,
+                        signal,
+                    });
+                }
+            }
+            DocxBlockKind::Table => {
+                let collapsed = collapse_whitespace(&block.text).trim().to_string();
+                if collapsed.len() >= MIN_PARAGRAPH_CHARS {
+                    items.push(ParaOrImage::Para(ParagraphEvent {
+                        text: collapsed,
+                        signal: PageBreakSignal::None,
+                        is_heading: false,
+                        heading_level: None,
+                        is_list: false,
+                        is_table: true,
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(items)
+}
+
+/// Image-aware variant of [`parse_docx_indexed_paragraphs`].
+/// Returns text paragraphs as `Para(ParagraphEvent)` and image blocks
+/// as `Image { rid, alt }`. Callers assign indices to Para items only.
+pub(super) fn parse_docx_indexed_items_with_images(
+    bytes: &[u8],
+) -> Result<Vec<ParaOrImage>, String> {
+    parse_docx_paragraph_events_with_images(bytes)
+}
+
 /// Canonical walker for the body of a DOCX document. Emits one [`DocxBlock`]
 /// per `<w:p>` or `<w:tbl>` with the raw text plus every signal the
 /// consumers care about (drawings, list markers, heading style, outline
@@ -473,6 +588,78 @@ pub(super) fn image_placeholder(alt: Option<&str>) -> String {
         Some(a) => format!("[Image: {a}]"),
         None => "[Image]".to_string(),
     }
+}
+
+/// Parse `word/_rels/document.xml.rels` and return a map of `rId → zip path`
+/// for image relationships (Type ending in `/image`).
+pub(super) fn parse_rels_xml_images(xml: &str) -> HashMap<String, String> {
+    let mut images = HashMap::new();
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                let ename = e.name();
+                let ebytes = ename.as_ref();
+                let local: &[u8] = ebytes.rsplit(|b| *b == b':').next().unwrap_or(ebytes);
+                if local == b"Relationship" {
+                    let mut id = String::new();
+                    let mut target = String::new();
+                    let mut rel_type = String::new();
+
+                    for attr in e.attributes().flatten() {
+                        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+                        let val = String::from_utf8_lossy(attr.value.as_ref()).to_string();
+                        match key.as_str() {
+                            "Id" => id = val,
+                            "Target" => target = val,
+                            "Type" => rel_type = val,
+                            _ => {}
+                        }
+                    }
+
+                    if rel_type.ends_with("/image") && !id.is_empty() && !target.is_empty() {
+                        let normalized = if let Some(stripped) = target.strip_prefix("../") {
+                            format!("word/{stripped}")
+                        } else if target.starts_with("word/") {
+                            target
+                        } else {
+                            format!("word/{target}")
+                        };
+                        images.insert(id, normalized);
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    images
+}
+
+/// Hash image bytes and return `"<16hex>.<ext>"` or `None` for unsupported
+/// formats (`.emf`, `.wmf`, etc.).
+pub(super) fn image_hash_name(bytes: &[u8], zip_path: &str) -> Option<String> {
+    let path = zip_path.to_ascii_lowercase();
+    let ext = if path.ends_with(".png") {
+        ".png"
+    } else if path.ends_with(".jpg") {
+        ".jpg"
+    } else if path.ends_with(".jpeg") {
+        ".jpeg"
+    } else if path.ends_with(".gif") {
+        ".gif"
+    } else if path.ends_with(".webp") {
+        ".webp"
+    } else {
+        return None;
+    };
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    Some(format!("{:016x}{ext}", hasher.finish()))
 }
 
 /// Returns true when the paragraph style name indicates a list item without
