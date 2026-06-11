@@ -4,6 +4,34 @@
 
 Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
 
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Chunking Modes](#chunking-modes)
+  - [Pick your mode](#pick-your-mode)
+  - [DOCX](#docx-modes)
+  - [DOC (Word 97–2003)](#doc-modes-word-972003)
+  - [PDF](#pdf-modes)
+  - [PPTX](#pptx-modes)
+  - [Markdown / HTML / TXT](#markdown-html-txt-modes)
+  - [XLSX / XLS](#xlsx--xls-modes)
+  - [CSV](#csv-modes)
+- [Markdown Conversion](#markdown-conversion)
+- [Streaming](#streaming)
+- [Supported Input Sources](#supported-input-sources)
+- [Supported Formats](#supported-formats)
+- [API Reference](#api-reference)
+- [Output Schema](#output-schema)
+- [Usage Examples](#usage-examples)
+- [Framework Integration](#framework-integration)
+- [Architecture](#architecture)
+- [Error Handling](#error-handling)
+- [Development & Testing](#development--testing)
+
+---
+
 ## Features
 
 - **10 Document Formats**: PDF, DOCX, DOC (Word 97–2003), PPTX, Markdown, HTML, TXT, CSV, XLSX, XLS
@@ -60,9 +88,9 @@ chunks = get_chunks("page.html",    mode="section")
 chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overlap=1)
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
 chunks = get_chunks("legacy.doc",   mode="default")        # DOC (Word 97-2003)
-chunks = get_chunks("data.xlsx",    mode="row",            rows_per_chunk=5)
-chunks = get_chunks("legacy.xls",   mode="row",            rows_per_chunk=5)
-chunks = get_chunks("data.csv",     mode="row",            rows_per_chunk=10)
+chunks = get_chunks("data.xlsx",    mode="row",            sentences_per_chunk=5)   # sentences_per_chunk → rows_per_chunk for XLSX/XLS
+chunks = get_chunks("legacy.xls",   mode="row",            sentences_per_chunk=5)   # same for XLS
+chunks = get_chunks("data.csv",     mode="row",            sentences_per_chunk=10)  # sentences_per_chunk → rows_per_chunk for CSV
 chunks = get_chunks("data.csv",     mode="sliding_window", window_size=5, overlap=1)
 
 for chunk in chunks:
@@ -118,6 +146,24 @@ The same seven modes are accepted by every format. The implementation is format-
 | `sliding_window` | Overlapping windows of N blocks. Params: `window_size` (default 3), `overlap` (default 1, must be `< window_size`). |
 | `sentence` | N sentences per chunk, detected without NLP (handles abbreviations like `Mr.`, `Dr.`, `e.g.`, numeric markers, initials). Param: `sentences_per_chunk` (default 3, must be `> 0`). |
 | `page_aware` | Groups by page boundary where available (PDF page breaks, DOCX `w:pageBreak` / `w:sectPr`, PPTX slides), with a paragraph-count fallback. Param: `paragraphs_per_page` (default 15 for most formats, **5 for PPTX** where it means slides-per-chunk). |
+
+### Pick your mode
+
+Not sure which mode to choose? Use this as a starting point:
+
+| I want to… | Best mode |
+|---|---|
+| Index every paragraph and heading individually | `default` / `structural` |
+| Keep all content under a heading in one chunk (e.g. for section-level search) | `section` |
+| Feed semantically coherent passages to an LLM or embedding model | `semantic` |
+| Enforce a fixed sentence count per chunk (tight token budget) | `sentence` |
+| Build overlapping chunks for dense retrieval or sliding-context inference | `sliding_window` |
+| Preserve the document's page layout (e.g. for page-referenced citations) | `page_aware` |
+| Chunk a spreadsheet N rows at a time | `row` (XLSX / XLS / CSV) |
+| Chunk by detected table region or named table | `table` (XLSX / XLS only) |
+| One chunk per sheet | `sheet` (XLSX / XLS only) |
+
+> **Default recommendation**: start with `semantic` when feeding an LLM and `section` when building a document search index. Use `default`/`structural` when you need fine-grained, element-level control.
 
 ### DOCX modes
 
@@ -187,6 +233,8 @@ for chunk in stream_chunks("file.doc", mode="semantic"):
 - Page breaks (`\x0C`) flush the current page group; they are not emitted as content.
 
 > **Markdown conversion**: `get_markdown("file.doc")` converts the `.doc` to Markdown — headings become `#`/`##`/`###`, list items become `- item`, table rows become `| cell | cell |`, and page breaks become `---`.
+
+> **Image extraction**: not supported for `.doc` files. `get_chunks("file.doc", list_images=True)` returns a `ChunksResult` with an empty `images` dict — no error is raised. Convert to `.docx` first if you need image extraction.
 
 > **Streaming**: all 7 modes are supported. `default`/`structural` use `DocStructuralIterator`; the other five modes each have a dedicated Rust iterator.
 
@@ -295,8 +343,10 @@ from py_chunks import get_chunks, stream_chunks
 from py_chunks.chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx
 
 # Batch — via unified API
-chunks = get_chunks("data.xlsx", mode="row", rows_per_chunk=5)
-chunks = get_chunks("legacy.xls", mode="row", rows_per_chunk=5)
+# Row count is set via sentences_per_chunk (it maps to rows_per_chunk for XLSX/XLS).
+# For max_chunk_chars, sheet_names, or other XLSX-specific params, use chunk_xlsx() directly.
+chunks = get_chunks("data.xlsx",   mode="row", sentences_per_chunk=5)   # → 5 rows/chunk
+chunks = get_chunks("legacy.xls",  mode="row", sentences_per_chunk=5)   # same for XLS
 
 # Batch — via format-specific chunker (returns chunks + timing)
 chunks, timing = chunk_xlsx("data.xlsx", mode="row",            rows_per_chunk=5)
@@ -310,7 +360,8 @@ chunks, timing = chunk_xlsx("data.xlsx", mode="semantic",       rows_per_chunk=1
 chunks, _ = chunk_xlsx("data.xlsx", mode="row", sheet_names=["Sales", "Q4"])
 
 # Streaming — identical output to batch
-for chunk in stream_chunks("data.xlsx", mode="row", rows_per_chunk=5):
+# Use sentences_per_chunk via unified API, or stream_chunk_xlsx for full control.
+for chunk in stream_chunks("data.xlsx", mode="row", sentences_per_chunk=5):  # → 5 rows/chunk
     print(chunk["content"])
 
 for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4, overlap=1):
@@ -341,6 +392,7 @@ for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4
 | `sheet_names` | list[str] \| None | None | Process only the named sheets; processes all sheets when `None` or `[]`. |
 | `skip_empty_rows` | bool | True | Skip rows where every cell is empty. |
 | `max_chunk_chars` | int | 2000 | Character limit per chunk (`table`, `sheet`, `page_aware` modes). |
+| `serialize_as` | str | `"key_value"` | Row serialization format. Only `"key_value"` is currently supported (each cell rendered as `"Header: value"`). Only applies to `chunk_xlsx`; `stream_chunk_xlsx` always uses `"key_value"`. |
 
 **XLS vs XLSX differences:**
 
@@ -361,6 +413,8 @@ for chunk in stream_chunk_xlsx("data.xlsx", mode="sliding_window", window_size=4
 | `sliding_window` | `sheet_name`, `sheet_index`, `window_size`, `overlap`, `actual_row_count`, `window_index`, `start_row`, `end_row`, `header_row`, `col_count`, `chunk_index` |
 | `page_aware` | `sheet_name`, `sheet_index`, `has_print_area`, `print_area_ref`, `start_row`, `end_row`, `start_col`, `end_col`, `row_count`, `col_count`, `header_row`, `region_index`, `chunk_index`, `is_split`, `split_part` |
 | `semantic` | `sheet_name`, `sheet_index`, `category_column`, `category_value`, `used_fallback`, `low_grouping_quality`, `avg_group_size`, `start_row`, `end_row`, `actual_row_count`, `header_row`, `col_count`, `group_index`, `chunk_index` |
+
+> **Unified API limitations**: the `get_chunks` / `stream_chunks` entry points do not expose `rows_per_chunk` or `max_chunk_chars` as named parameters for XLSX / XLS. Row count is controlled via `sentences_per_chunk` (which maps to `rows_per_chunk` for these formats). Character limits (`max_chunk_chars`) for `table`, `sheet`, and `page_aware` modes cannot be customised through the unified API — use `chunk_xlsx` / `stream_chunk_xlsx` directly for full parameter control.
 
 > **Streaming memory profile**: `row` and `sliding_window` pre-parse all sheet data once (calamine reads the entire file on open — there is no incremental I/O at the format level), then build and yield one chunk per `__next__`. The other four modes require global sheet analysis before the first chunk can be emitted, so they materialise all chunks at construction time and drain them lazily. In both cases the streaming iterator yields one chunk at a time.
 
@@ -530,7 +584,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 | **XLSX / XLS** | All 6 | State machine for `row` / `sliding_window`; batch-drain for `table` / `sheet` / `page_aware` / `semantic` | calamine reads the full file on open (no incremental I/O at format level). `row` and `sliding_window` build one chunk per `__next__` from pre-parsed row data. The other four modes require global analysis first and materialise all chunks at iterator construction. Output is identical to `chunk_xlsx` for every mode. |
 | **CSV** | All 3 | Background thread + `mpsc` channel for `row` / `default` / `page_aware`; `VecDeque` rolling buffer for `sliding_window` | True line-by-line worker — never loads the full file. `sliding_window` streaming uses an O(window_size) rolling buffer. Output is identical to `chunk_csv` for every mode. |
 
-> **Parity guarantee**: streaming output equals `list(get_chunks(...))` for every format and every supported mode (this is exercised by `test_pdf_streaming.py` for PDF and by the tests in `py_chunks/tests/test_source_apis.py`).
+> **Parity guarantee**: streaming output equals `list(get_chunks(...))` for every format and every supported mode. This is verified by the test suite in `py_chunks/tests/`.
 
 ### Streaming examples
 
@@ -570,20 +624,24 @@ for chunk in stream_chunks("deck.pptx", mode="semantic"):
     ...
 
 # XLSX / XLS — all 6 modes
-for chunk in stream_chunks("data.xlsx", mode="row", rows_per_chunk=10):
+# For row/semantic count control via unified API, use sentences_per_chunk (it maps to rows_per_chunk).
+# For max_chunk_chars or sheet_names control, use stream_chunk_xlsx() directly.
+for chunk in stream_chunks("data.xlsx", mode="row", sentences_per_chunk=10):       # → 10 rows/chunk
     embed_and_index(chunk)
 
 for chunk in stream_chunks("report.xls", mode="sliding_window", window_size=5, overlap=2):
     process(chunk)
 
-for chunk in stream_chunks("data.xlsx", mode="table", max_chunk_chars=3000):
+for chunk in stream_chunk_xlsx("data.xlsx", mode="table", max_chunk_chars=3000):   # max_chunk_chars requires stream_chunk_xlsx
     store_in_db(chunk)
 
-for chunk in stream_chunks("data.xlsx", mode="semantic", rows_per_chunk=20):
+for chunk in stream_chunks("data.xlsx", mode="semantic", sentences_per_chunk=20):  # → 20-row fallback groups
     handle(chunk)
 
 # CSV — all 3 modes
-for chunk in stream_chunks("data.csv", mode="row", rows_per_chunk=50):
+# For row count control via unified API, use sentences_per_chunk (it maps to rows_per_chunk).
+# For delimiter/encoding control, use stream_chunk_csv() directly.
+for chunk in stream_chunks("data.csv", mode="row", sentences_per_chunk=50):        # → 50 rows/chunk
     embed_and_index(chunk)
 
 for chunk in stream_chunks("data.csv", mode="sliding_window", window_size=5, overlap=1):
@@ -706,13 +764,12 @@ get_markdown(
 |---|---|---|---|
 | `source` | str, Path, bytes, file-like, upload, URL | — | Document source. Auto-detected. (`get_markdown` does not support URLs.) |
 | `filename` | str \| None | None | Required when source is `bytes` or a file object without a `.name` attribute. |
-| `list_images` | bool | `False` | (`get_markdown` only) When `True`, returns a `MarkdownResult` instead of `str`. Image bytes extracted for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; other formats return an empty `images` dict. |
 | `mode` | str | `"default"` | Chunking mode. Applies to **every** supported format (PDF, DOCX, DOC, PPTX, MD, HTML, TXT). One of `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`. |
 | `window_size` | int | 3 | Number of blocks per window (`sliding_window` mode). Must be `> 0`. |
 | `overlap` | int | 1 | Overlapping blocks between windows (`sliding_window` mode). Must be `< window_size`. |
-| `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. |
+| `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. **For XLSX / XLS and CSV** via the unified API, this value is re-used as `rows_per_chunk` (those formats have no sentence concept). Use `chunk_xlsx` / `chunk_csv` directly when you need explicit `rows_per_chunk` control. |
 | `paragraphs_per_page` | int | 15 | Block / paragraph quota before a page flush (`page_aware` mode). Must be `> 0`. For **PPTX** this means *slides per chunk* and the format-level default is `5`. |
-| `list_images` | bool | `False` | (`get_chunks` only) When `True`, returns a `ChunksResult` instead of `list[dict]`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; all other formats return an empty `images` dict. |
+| `list_images` | bool | `False` | `get_chunks`: when `True` returns a `ChunksResult` instead of `list[dict]`. `get_markdown`: when `True` returns a `MarkdownResult` instead of `str`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; all other formats return an empty `images` dict. **Not available for `stream_chunks`** — use `get_chunks(..., list_images=True)` if you need image bytes. |
 
 **Returns** — `list[dict]` (batch, `list_images=False`) or `ChunksResult` (batch, `list_images=True`) or `Iterator[dict]` (streaming) or `str` / `MarkdownResult` (`get_markdown`). Each chunk dict:
 
@@ -735,6 +792,17 @@ get_markdown(
 | `NotImplementedError` | Streaming requested for an unsupported format/mode |
 
 ---
+
+### When to use the unified API vs format-specific chunkers
+
+| Use `get_chunks` / `stream_chunks` when… | Use `chunk_<fmt>` / `stream_chunk_<fmt>` directly when… |
+|---|---|
+| You don't know the format ahead of time | You need `max_chunk_chars`, `delimiter`, `sheet_names`, or other format-specific params |
+| You're building a multi-format pipeline | You want per-call timing data (`{"rust_ms": …, "python_ms": …}`) |
+| You need URL, bytes, or upload source support | You only process one format and want to skip source detection overhead |
+| The default parameter values are sufficient | You need `rows_per_chunk` for XLSX/CSV (instead of the `sentences_per_chunk` proxy) |
+
+> **Rule of thumb**: start with `get_chunks`. Switch to `chunk_xlsx`, `chunk_csv`, etc. only when you hit a parameter the unified API doesn't expose.
 
 ### Format-specific chunkers (advanced)
 
@@ -845,6 +913,70 @@ md = md_to_markdown("readme.md")              # returned as-is
     "content":      "The extracted text segment.",
     "content_type": "plain_paragraph",
     "metadata": { ... }   # keys depend on format and mode — see below
+}
+```
+
+**Concrete examples**
+
+```python
+# PDF — section mode
+{
+    "content": "Introduction\n\nThis document covers the key design principles ...",
+    "content_type": "section",
+    "metadata": {
+        "section_heading": "Introduction",
+        "section_level": 1,
+        "heading_path": ["Introduction"],
+        "page_number": 1,
+        "paragraph_count": 3,
+        "heading_font_size": 16.0,
+    }
+}
+
+# DOCX — semantic mode
+{
+    "content": "The new authentication flow replaces the legacy token store. It uses short-lived JWTs ...",
+    "content_type": "semantic",
+    "metadata": {
+        "section_heading": "Authentication",
+        "section_heading_level": 2,
+        "paragraph_count": 2,
+        "merge_reason": "keyword_overlap",
+        "document_metadata": {"header_text": "", "footer_text": "Page 4", "image_count": 0},
+    }
+}
+
+# XLSX — row mode (3 rows/chunk via sentences_per_chunk=3)
+{
+    "content": "name: Alice\ndepartment: Engineering\nsalary: 95000\n---\nname: Bob\ndepartment: Sales\nsalary: 78000\n---\nname: Carol\ndepartment: Engineering\nsalary: 102000",
+    "content_type": "row_document",
+    "metadata": {
+        "sheet_name": "Employees",
+        "sheet_index": 0,
+        "row_index": 1,
+        "rows_per_chunk": 3,
+        "actual_row_count": 3,
+        "chunk_index": 0,
+        "header_row": ["name", "department", "salary"],
+        "col_count": 3,
+    }
+}
+
+# CSV — sliding_window mode
+{
+    "content": "id,product,revenue\n101,Widget A,4200\n102,Widget B,3800\n103,Widget C,5100",
+    "content_type": "row_window",
+    "metadata": {
+        "window_index": 0,
+        "window_size": 3,
+        "overlap": 1,
+        "row_start": 1,
+        "row_end": 3,
+        "actual_row_count": 3,
+        "col_count": 3,
+        "header_row": ["id", "product", "revenue"],
+        "chunk_index": 0,
+    }
 }
 ```
 
@@ -1034,6 +1166,40 @@ result = get_markdown(data, filename="report.docx", list_images=True)
 > **Deduplication**: if the same image appears multiple times in a document, it is stored once in `images` but an image chunk is emitted at each occurrence (for `get_chunks`) or referenced at each occurrence in `markdown` (for `get_markdown`).
 >
 > **Text parity guarantee**: non-image chunks from `list_images=True` are byte-for-byte identical to the output of `list_images=False` for every mode and every supported format.
+
+### RAG ingestion pipeline
+
+A common pattern: chunk documents from a folder, embed each chunk, and store in a vector database.
+
+```python
+import pathlib
+from py_chunks import stream_chunks
+
+SUPPORTED = {".pdf", ".docx", ".doc", ".pptx", ".md", ".html", ".htm",
+             ".txt", ".xlsx", ".xls", ".csv"}
+
+def ingest(file_path: str, embed_fn, store_fn):
+    """Chunk a document and write each chunk to a vector store."""
+    for chunk in stream_chunks(file_path, mode="semantic"):
+        text = chunk["content"].strip()
+        if not text:
+            continue
+        store_fn({
+            "text": text,
+            "embedding": embed_fn(text),
+            "source": file_path,
+            "content_type": chunk["content_type"],
+            **chunk["metadata"],
+        })
+
+# Process a mixed-format document folder
+docs = pathlib.Path("docs/")
+for path in docs.rglob("*"):
+    if path.suffix.lower() in SUPPORTED:
+        ingest(str(path), my_embed_fn, my_store_fn)
+```
+
+> **Tip**: use `mode="section"` for document search (preserves heading context in metadata) and `mode="semantic"` for LLM retrieval (merges related paragraphs). For large spreadsheets use `stream_chunks(..., mode="row", sentences_per_chunk=10)` to keep memory flat.
 
 ### Streaming a large PDF section-by-section
 
@@ -1320,18 +1486,10 @@ cd py_chunks
 python -m pytest -v
 ```
 
-### Full PDF strategy test (batch + streaming parity across all modes)
-
-```bash
-python test_pdf_streaming.py
-```
-
-Tests all 7 strategies × batch + streaming on every PDF in `test_files/`. Validates chunk count parity between batch and streaming paths.
-
 ### Code quality
 
 ```bash
-python -m pylint py_chunks tests/test_source_apis.py
+python -m pylint py_chunks
 ```
 
 Expected: 10.00/10

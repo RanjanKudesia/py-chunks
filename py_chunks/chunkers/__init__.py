@@ -1,5 +1,6 @@
 """Format-specific Python chunker wrappers."""
 
+from .doc import chunk_doc, stream_chunk_doc, doc_to_markdown
 from .docx import chunk_docx, stream_chunk_docx
 from .csv import chunk_csv, stream_chunk_csv
 from .html import chunk_html, stream_chunk_html
@@ -10,6 +11,9 @@ from .txt import chunk_txt, stream_chunk_txt
 from .xlsx import chunk_xlsx, stream_chunk_xlsx
 
 __all__ = [
+    "chunk_doc",
+    "stream_chunk_doc",
+    "doc_to_markdown",
     "chunk_docx",
     "stream_chunk_docx",
     "chunk_csv",
