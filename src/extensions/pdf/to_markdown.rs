@@ -1,18 +1,20 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use pdfium_render::prelude::*;
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use pyo3::wrap_pyfunction;
 
 use super::common::{is_bullet_line, is_numbered_line, ParagraphKind};
+use super::images::extract_pdf_images;
 use super::structural::{
     collect_paragraph_records, extract_spans_from_doc, get_pdfium, group_spans_into_paragraphs,
-    infer_section_level,
+    infer_section_level, ParagraphRecord,
 };
 
-#[pyfunction]
-pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
+fn validate_pdf_path(file_path: &str) -> PyResult<()> {
     let path = Path::new(file_path);
     if !path.exists() {
         return Err(PyIOError::new_err(format!(
@@ -30,15 +32,15 @@ pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
             "Expected a .pdf file, got: {file_path}"
         )));
     }
+    Ok(())
+}
 
-    let pdfium = get_pdfium().map_err(PyRuntimeError::new_err)?;
-    let doc = pdfium
-        .load_pdf_from_file(file_path, None)
-        .map_err(|e| PyIOError::new_err(format!("Failed to open PDF: {e}")))?;
-
-    let spans = extract_spans_from_doc(&doc);
+/// Group the document's text spans into paragraph records and compute the
+/// document-wide average font size used for heading-level inference.
+fn collect_records(doc: &PdfDocument<'_>) -> (Vec<ParagraphRecord>, f32) {
+    let spans = extract_spans_from_doc(doc);
     if spans.is_empty() {
-        return Ok(String::new());
+        return (Vec::new(), 12.0);
     }
     let grouped = group_spans_into_paragraphs(spans);
     let records = collect_paragraph_records(grouped);
@@ -49,10 +51,21 @@ pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
         records.iter().map(|r| r.avg_font_size).sum::<f32>() / records.len() as f32
     };
 
+    (records, doc_avg_font_size)
+}
+
+/// Render paragraph records to Markdown. When `images_by_page` is non-empty,
+/// image placeholders (`![name](name)`) are emitted at the top of each page's
+/// content, immediately after the page separator.
+fn render_records_markdown(
+    records: &[ParagraphRecord],
+    doc_avg_font_size: f32,
+    images_by_page: &HashMap<usize, Vec<String>>,
+) -> String {
     let mut out = String::new();
     let mut prev_page: Option<usize> = None;
 
-    for record in &records {
+    for record in records {
         let page = record.page_number;
         let separator = match prev_page {
             None => "",
@@ -60,6 +73,15 @@ pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
             _ => "\n\n---\n\n",
         };
         out.push_str(separator);
+
+        // On entering a new page, emit that page's images before its text.
+        if prev_page != Some(page) {
+            if let Some(names) = images_by_page.get(&page) {
+                for name in names {
+                    out.push_str(&format!("![{name}]({name})\n\n"));
+                }
+            }
+        }
         prev_page = Some(page);
 
         let para = &record.paragraph;
@@ -97,7 +119,63 @@ pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
         }
     }
 
-    Ok(out.trim().to_string())
+    out.trim().to_string()
+}
+
+#[pyfunction]
+pub fn pdf_to_markdown(file_path: &str) -> PyResult<String> {
+    validate_pdf_path(file_path)?;
+
+    let pdfium = get_pdfium().map_err(PyRuntimeError::new_err)?;
+    let doc = pdfium
+        .load_pdf_from_file(file_path, None)
+        .map_err(|e| PyIOError::new_err(format!("Failed to open PDF: {e}")))?;
+
+    let (records, doc_avg_font_size) = collect_records(&doc);
+    if records.is_empty() {
+        return Ok(String::new());
+    }
+
+    Ok(render_records_markdown(
+        &records,
+        doc_avg_font_size,
+        &HashMap::new(),
+    ))
+}
+
+#[pyfunction]
+pub fn pdf_to_markdown_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+    validate_pdf_path(file_path)?;
+
+    let pdfium = get_pdfium().map_err(PyRuntimeError::new_err)?;
+    let doc = pdfium
+        .load_pdf_from_file(file_path, None)
+        .map_err(|e| PyIOError::new_err(format!("Failed to open PDF: {e}")))?;
+
+    let (records, doc_avg_font_size) = collect_records(&doc);
+    let (image_infos, image_out) = extract_pdf_images(&doc);
+
+    // Map each page to the (deduplicated) images that appear on it, preserving
+    // first-seen order.
+    let mut images_by_page: HashMap<usize, Vec<String>> = HashMap::new();
+    for info in &image_infos {
+        let entry = images_by_page.entry(info.page_number).or_default();
+        if !entry.contains(&info.hash_name) {
+            entry.push(info.hash_name.clone());
+        }
+    }
+
+    let markdown = render_records_markdown(&records, doc_avg_font_size, &images_by_page);
+
+    let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
+        .into_iter()
+        .map(|(name, data)| (name, PyBytes::new_bound(py, &data).unbind()))
+        .collect();
+
+    Ok((markdown, image_out_py))
 }
 
 fn split_table_row(line: &str) -> Vec<String> {
@@ -189,5 +267,6 @@ fn table_text_to_markdown_table(text: &str) -> String {
 
 pub(crate) fn register(m: &pyo3::Bound<'_, PyModule>) -> pyo3::PyResult<()> {
     m.add_function(wrap_pyfunction!(pdf_to_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(pdf_to_markdown_with_images, m)?)?;
     Ok(())
 }
