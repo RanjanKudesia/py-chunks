@@ -14,7 +14,13 @@ from .chunkers.xlsx import (
 )
 from .chunkers.txt import chunk_txt, stream_chunk_txt, txt_to_markdown as _txt_to_markdown
 from .chunkers.pptx import chunk_pptx, chunk_pptx_with_images as _chunk_pptx_with_images, pptx_to_markdown as _pptx_to_markdown, pptx_to_markdown_with_images as _pptx_to_markdown_with_images, stream_chunk_pptx
-from .chunkers.pdf import chunk_pdf, pdf_to_markdown as _pdf_to_markdown, stream_chunk_pdf
+from .chunkers.pdf import (
+    chunk_pdf,
+    chunk_pdf_with_images as _chunk_pdf_with_images,
+    pdf_to_markdown as _pdf_to_markdown,
+    pdf_to_markdown_with_images as _pdf_to_markdown_with_images,
+    stream_chunk_pdf,
+)
 from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
 from .chunkers.html import (
     chunk_html,
@@ -112,6 +118,7 @@ _MD_IMAGE_DISPATCH: dict[str, Any] = {
     ".xlsx": _xlsx_to_markdown_with_images,
     ".html": _html_to_markdown_with_images,
     ".htm":  _html_to_markdown_with_images,
+    ".pdf":  _pdf_to_markdown_with_images,
 }
 
 _CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
@@ -120,6 +127,7 @@ _CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
     ".xlsx": _chunk_xlsx_with_images,
     ".html": _chunk_html_with_images,
     ".htm":  _chunk_html_with_images,
+    ".pdf":  _chunk_pdf_with_images,
 }
 
 

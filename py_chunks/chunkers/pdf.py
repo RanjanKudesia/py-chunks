@@ -177,3 +177,59 @@ def pdf_to_markdown(file_path: str) -> str:
     if path.suffix.lower() != ".pdf":
         raise ValueError(f"Expected a .pdf file, got: {file_path}")
     return _rust.pdf_to_markdown(str(path))
+
+
+def chunk_pdf_with_images(
+    file_path: str,
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk a PDF file and extract embedded images as dedicated chunks.
+
+    Image chunks (``content_type == "image"``) are prepended to the text
+    chunks, one per page-occurrence of an embedded raster. Each carries a
+    ``page_number`` and ``image_name`` in its metadata.
+
+    Returns:
+        (chunks, images) where images maps hash-named ``.png`` filenames to
+        raw PNG bytes (deduplicated by content).
+    """
+    path = Path(file_path)
+    _validate_pdf_args(
+        path,
+        file_path,
+        mode,
+        window_size,
+        overlap,
+        sentences_per_chunk,
+        paragraphs_per_page,
+    )
+    chunk_list, image_list = _rust.chunk_pdf_with_images(
+        str(path),
+        mode,
+        window_size,
+        overlap,
+        sentences_per_chunk,
+        paragraphs_per_page,
+    )
+    return chunk_list, dict(image_list)
+
+
+def pdf_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert a PDF file to Markdown and extract embedded images.
+
+    Returns:
+        (markdown, images) where markdown contains ``![name](name)`` references
+        at the top of each page's content, and images maps hash-named ``.png``
+        filenames to raw PNG bytes (deduplicated by content).
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+    if path.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a .pdf file, got: {file_path}")
+    md, image_list = _rust.pdf_to_markdown_with_images(str(path))
+    return md, dict(image_list)
