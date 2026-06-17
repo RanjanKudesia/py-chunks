@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.4.4"
+version = "0.4.5"
 description = "Rust-backed Python chunking library"
 requires-python = ">=3.9"
 dependencies = ["pypdfium2"]

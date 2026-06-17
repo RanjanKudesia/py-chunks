@@ -6,11 +6,6 @@ on:
       - 'v*'
   workflow_dispatch:
 
-# PDFium build number from https://github.com/bblanchon/pdfium-binaries/releases
-# Update this to pick up a newer PDFium build.
-env:
-  PDFIUM_VERSION: "6996"
-
 jobs:
 
   # ── macOS ──────────────────────────────────────────────────────────────────
@@ -23,26 +18,11 @@ jobs:
         include:
           - os: macos-14          # Apple Silicon
             target: aarch64-apple-darwin
-            pdfium_artifact: pdfium-mac-arm64
           - os: macos-15-intel    # Intel (macos-13 retired Dec 2025)
             target: x86_64-apple-darwin
-            pdfium_artifact: pdfium-mac-x64
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download and bundle PDFium
-        run: |
-          curl -fL \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${{ env.PDFIUM_VERSION }}/${{ matrix.pdfium_artifact }}.tgz" \
-            -o pdfium.tgz
-          tar -xzf pdfium.tgz
-          LIB=$(find . -name "libpdfium.dylib" | grep -v pdfium.tgz | head -1)
-          [ -n "$LIB" ] || { echo "libpdfium.dylib not found in archive"; exit 1; }
-          cp "$LIB" py_chunks/libpdfium.dylib
-          # Ad-hoc sign so macOS will dlopen() it without quarantine issues
-          codesign -s - --force py_chunks/libpdfium.dylib
-          echo "Bundled $(du -sh py_chunks/libpdfium.dylib)"
 
       - uses: actions/setup-python@v5
         with:
@@ -61,10 +41,6 @@ jobs:
           path: target/wheels
 
   # ── Linux x86_64 ───────────────────────────────────────────────────────────
-  # Strategy: build the manylinux wheel first (so auditwheel can audit the
-  # Rust extension cleanly), then inject the PDFium .so into the wheel zip
-  # afterwards.  auditwheel only audits ELF extension modules — a plain data
-  # file added post-build is never inspected.
   build-linux:
     name: Linux x86_64
     runs-on: ubuntu-22.04
@@ -75,18 +51,6 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Download PDFium (save for post-build injection)
-        run: |
-          curl -fL \
-            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${{ env.PDFIUM_VERSION }}/pdfium-linux-x64.tgz" \
-            -o pdfium.tgz
-          tar -xzf pdfium.tgz
-          LIB=$(find . -name "libpdfium.so" | grep -v pdfium.tgz | head -1)
-          [ -n "$LIB" ] || { echo "libpdfium.so not found in archive"; exit 1; }
-          mkdir -p /tmp/pdfium_bins
-          cp "$LIB" /tmp/pdfium_bins/libpdfium.so
-          echo "Saved $(du -sh /tmp/pdfium_bins/libpdfium.so)"
-
       - name: Build manylinux wheel
         uses: PyO3/maturin-action@v1
         with:
@@ -94,26 +58,6 @@ jobs:
           target: x86_64-unknown-linux-gnu
           manylinux: "2_28"
           args: --release --out target/wheels
-
-      - name: Inject PDFium into wheel
-        run: |
-          python3 - << 'PYEOF'
-          import zipfile, glob, os
-
-          wheels = [w for w in glob.glob("target/wheels/*.whl") if "linux" in w or "manylinux" in w]
-          if not wheels:
-              raise FileNotFoundError("No linux wheel found in target/wheels/")
-
-          for wheel_path in wheels:
-              tmp = wheel_path + ".tmp"
-              with zipfile.ZipFile(wheel_path, "r") as zin:
-                  with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
-                      for item in zin.infolist():
-                          zout.writestr(item, zin.read(item.filename))
-                      zout.write("/tmp/pdfium_bins/libpdfium.so", "py_chunks/libpdfium.so")
-              os.replace(tmp, wheel_path)
-              print(f"Injected libpdfium.so into {os.path.basename(wheel_path)}")
-          PYEOF
 
       - uses: actions/upload-artifact@v4
         with:
@@ -130,30 +74,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-
-      - name: Download and bundle PDFium + MSVC runtime
-        shell: pwsh
-        run: |
-          Invoke-WebRequest `
-            -Uri "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${{ env.PDFIUM_VERSION }}/pdfium-win-x64.tgz" `
-            -OutFile pdfium.tgz
-          New-Item -ItemType Directory -Name pdfium_tmp -Force | Out-Null
-          tar -xzf pdfium.tgz -C pdfium_tmp
-          $dll = Get-ChildItem -Path pdfium_tmp -Recurse -Filter "pdfium.dll" | Select-Object -First 1
-          if (-not $dll) { Write-Error "pdfium.dll not found in archive"; exit 1 }
-          Copy-Item -Path $dll.FullName -Destination "py_chunks\pdfium.dll"
-          Write-Host "Bundled $($dll.Name) ($('{0:N0}' -f (Get-Item py_chunks\pdfium.dll).Length) bytes)"
-
-          # Bundle MSVC runtime DLLs alongside pdfium.dll so the Rust
-          # LOAD_WITH_ALTERED_SEARCH_PATH preload finds them in py_chunks/.
-          $runtimeDlls = @("vcruntime140.dll", "msvcp140.dll", "vcruntime140_1.dll")
-          foreach ($rt in $runtimeDlls) {
-            $src = "C:\Windows\System32\$rt"
-            if (Test-Path $src) {
-              Copy-Item -Path $src -Destination "py_chunks\$rt"
-              Write-Host "Bundled runtime $rt"
-            }
-          }
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
