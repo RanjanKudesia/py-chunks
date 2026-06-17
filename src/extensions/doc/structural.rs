@@ -487,7 +487,12 @@ pub(crate) fn build_page_aware_chunks(
     out
 }
 
-fn chunks_to_py(py: Python<'_>, file_path: &str, chunks: Vec<ChunkRecord>, rust_ms: f64) -> PyResult<PyObject> {
+pub(crate) fn chunks_to_py(
+    py: Python<'_>,
+    file_path: &str,
+    chunks: Vec<ChunkRecord>,
+    rust_ms: f64,
+) -> PyResult<PyObject> {
     let total_chunks = chunks.len();
     let py_chunks: Vec<PyObject> = chunks
         .iter()

@@ -21,6 +21,7 @@ from .chunkers.pdf import (
     pdf_to_markdown_with_images as _pdf_to_markdown_with_images,
     stream_chunk_pdf,
 )
+from .chunkers.ppt import chunk_ppt, ppt_to_markdown as _ppt_to_markdown, stream_chunk_ppt
 from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
 from .chunkers.html import (
     chunk_html,
@@ -92,6 +93,7 @@ _DISPATCH = {
     ".htm": chunk_html,
     ".md": chunk_md,
     ".pdf": chunk_pdf,
+    ".ppt": chunk_ppt,
     ".pptx": chunk_pptx,
     ".txt": chunk_txt,
     ".xlsx": chunk_xlsx,
@@ -101,6 +103,7 @@ _DISPATCH = {
 _MD_DISPATCH = {
     ".doc":  _doc_to_markdown,
     ".docx": _docx_to_markdown,
+    ".ppt":  _ppt_to_markdown,
     ".pptx": _pptx_to_markdown,
     ".pdf":  _pdf_to_markdown,
     ".html": _html_to_markdown,
@@ -161,6 +164,7 @@ _EXT_CSV = ".csv"
 _EXT_PDF = ".pdf"
 _EXT_MD = ".md"
 _EXT_TXT = ".txt"
+_EXT_PPT = ".ppt"
 _EXT_PPTX = ".pptx"
 _EXT_HTML = ".html"
 _EXT_HTM = ".htm"
@@ -676,6 +680,15 @@ def stream_chunks_from_path(
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
         )
+    if ext == _EXT_PPT:
+        return stream_chunk_ppt(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
     if ext == _EXT_PPTX:
         return stream_chunk_pptx(
             file_path,
@@ -796,6 +809,16 @@ def stream_chunks_from_bytes(
         return _StreamingFileCleanup(iterator, tmp_path)
     if ext == _EXT_TXT:
         iterator = stream_chunk_txt(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_PPT:
+        iterator = stream_chunk_ppt(
             tmp_path,
             mode=mode,
             window_size=window_size,

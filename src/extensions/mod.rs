@@ -4,6 +4,7 @@ pub mod docx;
 pub mod html;
 pub mod md;
 pub mod pdf;
+pub mod ppt;
 pub mod pptx;
 pub mod shared;
 pub mod txt;
