@@ -4,7 +4,7 @@ use pyo3::types::PyModule;
 use pyo3::wrap_pyfunction;
 
 use super::structural::{load_doc_paragraphs, validate_doc_path};
-use super::text_extractor::ParagraphType;
+use super::text_extractor::{DocParagraph, ParagraphType};
 
 fn render_table_row(content: &str) -> String {
     let cells: Vec<String> = content.split('|').map(|c| c.trim().to_string()).collect();
@@ -18,11 +18,9 @@ fn render_table_row(content: &str) -> String {
     format!("{row}\n{sep}")
 }
 
-#[pyfunction]
-pub fn doc_to_markdown(file_path: &str) -> PyResult<String> {
-    validate_doc_path(file_path)?;
-    let paragraphs = load_doc_paragraphs(file_path).map_err(PyRuntimeError::new_err)?;
-
+/// Render a paragraph list to Markdown. Shared by `.doc` and `.ppt`, both of
+/// which produce `Vec<DocParagraph>`.
+pub(crate) fn render_paragraphs_markdown(paragraphs: Vec<DocParagraph>) -> String {
     let mut rendered: Vec<String> = Vec::new();
 
     for p in paragraphs {
@@ -74,8 +72,14 @@ pub fn doc_to_markdown(file_path: &str) -> PyResult<String> {
         out = out.trim_end().to_string();
     }
 
-    out = out.trim().to_string();
-    Ok(out)
+    out.trim().to_string()
+}
+
+#[pyfunction]
+pub fn doc_to_markdown(file_path: &str) -> PyResult<String> {
+    validate_doc_path(file_path)?;
+    let paragraphs = load_doc_paragraphs(file_path).map_err(PyRuntimeError::new_err)?;
+    Ok(render_paragraphs_markdown(paragraphs))
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

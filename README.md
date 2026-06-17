@@ -15,6 +15,7 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - [DOC (Word 97–2003)](#doc-modes-word-972003)
   - [PDF](#pdf-modes)
   - [PPTX](#pptx-modes)
+  - [PPT (PowerPoint 97–2003)](#ppt-modes-powerpoint-972003)
   - [Markdown / HTML / TXT](#markdown-html-txt-modes)
   - [XLSX / XLS](#xlsx--xls-modes)
   - [CSV](#csv-modes)
@@ -34,7 +35,7 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
 
 ## Features
 
-- **10 Document Formats**: PDF, DOCX, DOC (Word 97–2003), PPTX, Markdown, HTML, TXT, CSV, XLSX, XLS
+- **11 Document Formats**: PDF, DOCX, DOC (Word 97–2003), PPTX, PPT (PowerPoint 97–2003), Markdown, HTML, TXT, CSV, XLSX, XLS
 - **7 Chunking Modes for document formats**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
 - **6 Chunking Modes for spreadsheet formats** (XLSX / XLS): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
 - **4 Chunking Modes for CSV**: `row`, `default`, `sliding_window`, `page_aware`
@@ -43,10 +44,11 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - Markdown / HTML / TXT: block-by-block state machine for `structural` + `semantic`; batch-drain for the rest
   - DOCX: all 7 modes — `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes (lazy chunk emission after a single upfront parse)
   - DOC: all 7 modes — `DocStructuralIterator` for `default`/`structural`; dedicated per-mode iterators for the remaining 5 modes
+  - PPT (PowerPoint 97–2003): all 7 modes — reuses the DOC iterators after extracting slide text from the binary record stream
   - PPTX: batch-drain (ZIP must be read upfront, then chunks are yielded one at a time)
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
   - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
-- **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (11 extensions: `.doc`, `.docx`, `.pptx`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
+- **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (12 extensions: `.doc`, `.docx`, `.pptx`, `.ppt`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
 - **Image extraction** for DOCX, PPTX, XLSX, HTML, and PDF in two modes:
   - `get_chunks(..., list_images=True)` — returns a `ChunksResult` with the normal chunk list plus a `dict[str, bytes]` of every embedded image; each image also appears as a dedicated `content_type="image"` chunk whose `content` is the image's hash filename. All 7 chunking modes supported for document formats; all 6 for XLSX.
   - `get_markdown(..., list_images=True)` — returns a `MarkdownResult` with the rendered Markdown plus the same image dict. Images keyed by a stable content hash; web-renderable formats only: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`.
@@ -89,6 +91,7 @@ chunks = get_chunks("page.html",    mode="section")
 chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overlap=1)
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
 chunks = get_chunks("legacy.doc",   mode="default")        # DOC (Word 97-2003)
+chunks = get_chunks("legacy.ppt",   mode="default")        # PPT (PowerPoint 97-2003)
 chunks = get_chunks("data.xlsx",    mode="row",            sentences_per_chunk=5)   # sentences_per_chunk → rows_per_chunk for XLSX/XLS
 chunks = get_chunks("legacy.xls",   mode="row",            sentences_per_chunk=5)   # same for XLS
 chunks = get_chunks("data.csv",     mode="row",            sentences_per_chunk=10)  # sentences_per_chunk → rows_per_chunk for CSV
@@ -336,6 +339,49 @@ for chunk in stream_chunks("deck.pptx", mode="section"):
 
 ---
 
+### PPT modes (PowerPoint 97–2003)
+
+`.ppt` files use the same 7-mode API as DOCX/DOC and produce the same output schema as `.doc`. The parser is a pure Rust implementation: it opens the Compound Binary File (`cfb`) container, walks the "PowerPoint Document" record stream, and extracts slide text — no LibreOffice, no external processes.
+
+```python
+from py_chunks import get_chunks, stream_chunks
+
+chunks = get_chunks("deck.ppt", mode="default")        # structural (default)
+chunks = get_chunks("deck.ppt", mode="structural")     # same as default
+chunks = get_chunks("deck.ppt", mode="section")        # one chunk per slide
+chunks = get_chunks("deck.ppt", mode="semantic")       # one chunk per slide (continuity merge)
+chunks = get_chunks("deck.ppt", mode="sliding_window", window_size=3, overlap=1)
+chunks = get_chunks("deck.ppt", mode="sentence",       sentences_per_chunk=3)
+chunks = get_chunks("deck.ppt", mode="page_aware",     paragraphs_per_page=15)
+
+# Streaming — all 7 modes supported
+for chunk in stream_chunks("deck.ppt", mode="section"):
+    process(chunk)
+```
+
+| Mode | Description |
+|---|---|
+| `default` / `structural` | One chunk per paragraph: slide title (`heading`), bullet (`bullet_list`), or prose. Short paragraphs (< 80 chars) merge into a `short_disconnected_paragraph` chunk. |
+| `section` | All paragraphs of a slide grouped into one chunk (≤ 2 000 chars) — effectively one chunk per slide. |
+| `semantic` | Paragraphs merged by keyword overlap / reference continuity (≤ 1 200 chars). |
+| `sliding_window` | Overlapping windows of N paragraphs. Params: `window_size` (default 3), `overlap` (default 1). |
+| `sentence` | N sentences per chunk. Param: `sentences_per_chunk` (default 3). |
+| `page_aware` | Chunks at slide boundaries (one chunk per slide), with paragraph-count fallback. Param: `paragraphs_per_page` (default 15). |
+
+**Format notes**:
+- Slides are read from the `SlideListWithText` (slides list) in presentation order; speaker notes and master text are excluded.
+- Slide titles become `Heading(2)`; body placeholders that contain multiple lines are emitted as bullet list items (`- item` in Markdown), matching how PowerPoint renders them. Single-paragraph bodies stay prose.
+- Freeform (non-placeholder) text boxes are merged in and de-duplicated, so text added directly onto a slide is not dropped.
+- A `---` separator is inserted between slides in the chunk stream and in Markdown.
+
+> **Markdown conversion**: `get_markdown("deck.ppt")` converts the `.ppt` to Markdown — slide titles become `##`, bullets become `- item`, and slides are separated by `---`.
+
+> **Image extraction**: not supported for `.ppt` files (by design — it mirrors `.doc`). `get_chunks("deck.ppt", list_images=True)` returns a `ChunksResult` with an empty `images` dict — no error is raised. Convert to `.pptx` if you need image extraction.
+
+> **Streaming**: all 7 modes are supported, reusing the DOC iterators after the slide text is extracted.
+
+---
+
 ### Markdown, HTML, TXT modes
 
 All three formats accept the full set of 7 modes:
@@ -513,6 +559,7 @@ md = get_markdown(BytesIO(data), filename="document.pdf")
 | `.docx` | Full fidelity: headings (`#`–`######` from Word heading styles / outline levels), unordered lists (`- item`), ordered lists (`1. item`) with per-level indentation, pipe tables, fenced code blocks, hyperlinks as `[text](url)`, page/section breaks as `---`, footnotes and endnotes as `[^id]: text` appended at the end. Images: rendered as `[Image: alt]` / `[Image]` by default; use `list_images=True` to get `![](hash.ext)` refs and the raw image bytes in `MarkdownResult.images` |
 | `.doc` | H1 → `#`, H2–H3 → `##`, H4+ → `###`; lists → `- item`; each table paragraph → pipe row with `\| --- \|` separator; page breaks → `---`; plain paragraphs as-is |
 | `.pptx` | Presentation title → `# Title`; PPTX sections → `# Section Name`; each slide → `## Slide N: Title` (or `## Slide N`); paragraphs as plain text; unordered bullets (`- item`) and ordered bullets (`1. item`) with per-level indentation; pipe tables; speaker notes as `> **Notes:** …`; slides/sections separated by `---`. Images: rendered as `[Image: alt]` by default; use `list_images=True` to get `![](hash.ext)` refs and the raw image bytes in `MarkdownResult.images` |
+| `.ppt` | Slide titles → `##`; body placeholders → `- item` bullets (multi-line) or prose; slides separated by `---`. Freeform text boxes are included. Image extraction is not supported (returns no images). |
 | `.pdf` | Headings inferred from font size vs document average → `#` / `##` / `###`; bullet lists preserved or normalized to `- item`; tables detected by tab/multi-space alignment → pipe tables; page boundaries → `---`. Images: ignored by default; use `list_images=True` to get `![](hash.png)` refs at the top of each page and the raw PNG bytes in `MarkdownResult.images` |
 | `.html`, `.htm` | H1–H6 → `#`–`######`; paragraphs as plain text; ordered lists → `1. item`; unordered lists → `- item`; code blocks → fenced ` ``` `; pipe tables with auto-detected header row; `\|` in cells escaped. Images: ignored by default; use `list_images=True` to extract base64 data URIs and local file references as `![alt](hash.ext)` refs appended at the end, plus raw bytes in `MarkdownResult.images` |
 | `.xlsx`, `.xls` | Each non-empty sheet → `## SheetName` heading + pipe table; sheets separated by `---`. Images: ignored by default; use `list_images=True` to get `![](hash.ext)` refs after each sheet table and raw bytes in `MarkdownResult.images` (XLSX only; XLS returns `images={}`). |
@@ -609,6 +656,7 @@ Use `stream_chunks` (or the `stream_chunks_from_*` variants) when:
 | **DOCX** | All 7 | `DocxStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Full document parsed once upfront; chunks emitted lazily. Peak memory ≈ file size + chunk vec. Output equals `get_chunks` for every mode. |
 | **DOC** | All 7 | `DocStructuralIterator` for `default`/`structural`; dedicated per-mode Rust iterators for the other 5 | Binary stream parsed once upfront via piece table reconstruction; chunks emitted lazily. Output equals `get_chunks` for every mode. |
 | **PPTX** | All 7 | Batch-drain | PPTX requires the full ZIP up front, so chunks are computed once at construction and yielded one per `__next__`. |
+| **PPT** | All 7 | Reuses the DOC iterators (`default`/`structural` + dedicated per-mode) | Slide text extracted once from the binary record stream, then chunks emitted lazily. Output equals `get_chunks` for every mode. |
 | **XLSX / XLS** | All 6 | State machine for `row` / `sliding_window`; batch-drain for `table` / `sheet` / `page_aware` / `semantic` | calamine reads the full file on open (no incremental I/O at format level). `row` and `sliding_window` build one chunk per `__next__` from pre-parsed row data. The other four modes require global analysis first and materialise all chunks at iterator construction. Output is identical to `chunk_xlsx` for every mode. |
 | **CSV** | All 3 | Background thread + `mpsc` channel for `row` / `default` / `page_aware`; `VecDeque` rolling buffer for `sliding_window` | True line-by-line worker — never loads the full file. `sliding_window` streaming uses an O(window_size) rolling buffer. Output is identical to `chunk_csv` for every mode. |
 
@@ -650,6 +698,10 @@ for chunk in stream_chunks("legacy.doc", mode="page_aware", paragraphs_per_page=
 # PPTX — any mode
 for chunk in stream_chunks("deck.pptx", mode="semantic"):
     ...
+
+# PPT (PowerPoint 97-2003) — all 7 modes
+for chunk in stream_chunks("legacy.ppt", mode="section"):
+    index(chunk)
 
 # XLSX / XLS — all 6 modes
 # For row/semantic count control via unified API, use sentences_per_chunk (it maps to rows_per_chunk).
@@ -730,6 +782,7 @@ Or use the explicit source-specific helpers:
 | DOCX       | `.docx`           | All 7 | All 7 (dedicated iterator per mode) |
 | DOC        | `.doc`            | All 7 | All 7 (dedicated iterator per mode) |
 | PPTX       | `.pptx`           | All 7 | All 7 (batch-drain) |
+| PPT        | `.ppt`            | All 7 | All 7 (dedicated iterator per mode) |
 | Markdown   | `.md`             | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | HTML       | `.html`, `.htm`   | All 7 | All 7 (state machine for `structural` / `semantic`) |
 | Plain Text | `.txt`            | All 7 | All 7 (state machine for `structural` / `semantic`) |
@@ -742,7 +795,7 @@ The 6 spreadsheet modes are: `row`, `table`, `sheet`, `sliding_window`, `page_aw
 
 The 3 CSV modes are: `row` / `default`, `sliding_window`, `page_aware`.
 
-**`get_markdown` supported extensions**: `.doc`, `.docx`, `.pptx`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`
+**`get_markdown` supported extensions**: `.doc`, `.docx`, `.pptx`, `.ppt`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`
 
 ---
 
@@ -841,6 +894,7 @@ from py_chunks.chunkers.pdf  import chunk_pdf,  chunk_pdf_with_images, stream_ch
 from py_chunks.chunkers.docx import chunk_docx, chunk_docx_with_images, stream_chunk_docx, docx_to_markdown, docx_to_markdown_with_images
 from py_chunks.chunkers.doc  import chunk_doc,  stream_chunk_doc,  doc_to_markdown
 from py_chunks.chunkers.pptx import chunk_pptx, chunk_pptx_with_images, stream_chunk_pptx, chunk_pptx_with_strategy, pptx_to_markdown, pptx_to_markdown_with_images
+from py_chunks.chunkers.ppt  import chunk_ppt,  stream_chunk_ppt,  ppt_to_markdown
 from py_chunks.chunkers.html import chunk_html, chunk_html_with_images, stream_chunk_html, html_to_markdown, html_to_markdown_with_images
 from py_chunks.chunkers.md   import chunk_md,   stream_chunk_md,   md_to_markdown
 from py_chunks.chunkers.txt  import chunk_txt,  stream_chunk_txt,  txt_to_markdown
@@ -856,6 +910,7 @@ chunks, timing = chunk_html("page.html", mode="sliding_window", window_size=4, o
 chunks, timing = chunk_txt("log.txt", mode="sentence", sentences_per_chunk=2)
 chunks, timing = chunk_pptx("deck.pptx", mode="page_aware", paragraphs_per_page=5)
 chunks, timing = chunk_doc("legacy.doc", mode="section")
+chunks, timing = chunk_ppt("legacy.ppt", mode="section")
 
 # Legacy PPTX strategy wrapper (kept for backward compatibility)
 chunks, timing = chunk_pptx_with_strategy("deck.pptx", strategy="structural")
@@ -902,6 +957,7 @@ for chunk in stream_chunk_csv("data.csv", mode="page_aware",     rows_per_chunk=
 # Markdown conversion — direct format wrappers
 md = docx_to_markdown("report.docx")          # full DOCX → Markdown (headings, lists, tables, footnotes, hyperlinks…)
 md = doc_to_markdown("legacy.doc")            # DOC binary → Markdown (headings, lists, tables, page breaks)
+md = ppt_to_markdown("legacy.ppt")           # PPT binary → Markdown (slide titles as ##, bullets, slides split by ---)
 md = pdf_to_markdown("paper.pdf")             # PDF → Markdown (headings by font size, lists, tables, page separators)
 md = pptx_to_markdown("deck.pptx")           # PPTX → Markdown (title, sections, slides as ##, notes as blockquote)
 
@@ -1115,8 +1171,8 @@ print(md)
 ```python
 from py_chunks import get_markdown
 
-# Works for all 11 supported extensions
-for path in ["report.docx", "legacy.doc", "deck.pptx", "paper.pdf",
+# Works for all 12 supported extensions
+for path in ["report.docx", "legacy.doc", "deck.pptx", "legacy.ppt", "paper.pdf",
              "data.xlsx", "data.csv", "notes.txt", "readme.md"]:
     md = get_markdown(path)
     print(f"--- {path} ---")
@@ -1460,7 +1516,7 @@ except FileNotFoundError as e:
 try:
     chunks = get_chunks("image.png")
 except ValueError as e:
-    print(e)   # Unsupported file type '.png'. Supported: .csv, .doc, .docx, .htm, .html, .md, .pdf, .pptx, .txt, .xls, .xlsx
+    print(e)   # Unsupported file type '.png'. Supported: .csv, .doc, .docx, .htm, .html, .md, .pdf, .ppt, .pptx, .txt, .xls, .xlsx
 
 # Pre-Word 97 .doc file (not supported)
 try:

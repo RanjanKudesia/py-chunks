@@ -12,6 +12,7 @@ fn _rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     extensions::html::register(m)?;
     extensions::md::register(m)?;
     extensions::pdf::register(m)?;
+    extensions::ppt::register(m)?;
     extensions::pptx::register(m)?;
     extensions::txt::register(m)?;
     extensions::xlsx::register(m)?;
