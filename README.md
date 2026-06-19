@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
+Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, PPT, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
 
 ## Contents
 
@@ -92,9 +92,9 @@ chunks = get_chunks("deck.pptx",    mode="sliding_window", window_size=3, overla
 chunks = get_chunks("report.docx",  mode="sentence",       sentences_per_chunk=3)
 chunks = get_chunks("legacy.doc",   mode="default")        # DOC (Word 97-2003)
 chunks = get_chunks("legacy.ppt",   mode="default")        # PPT (PowerPoint 97-2003)
-chunks = get_chunks("data.xlsx",    mode="row",            sentences_per_chunk=5)   # sentences_per_chunk → rows_per_chunk for XLSX/XLS
-chunks = get_chunks("legacy.xls",   mode="row",            sentences_per_chunk=5)   # same for XLS
-chunks = get_chunks("data.csv",     mode="row",            sentences_per_chunk=10)  # sentences_per_chunk → rows_per_chunk for CSV
+chunks = get_chunks("data.xlsx",    mode="row")                                    # XLSX (use chunk_xlsx() for rows_per_chunk control)
+chunks = get_chunks("legacy.xls",   mode="row")                                    # XLS
+chunks = get_chunks("data.csv",     mode="row")                                    # CSV (use chunk_csv() for rows_per_chunk control)
 chunks = get_chunks("data.csv",     mode="sliding_window", window_size=5, overlap=1)
 
 for chunk in chunks:
@@ -850,7 +850,7 @@ get_markdown(
 | `overlap` | int | 1 | Overlapping blocks between windows (`sliding_window` mode). Must be `< window_size`. |
 | `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. **For XLSX / XLS and CSV** via the unified API, this value is re-used as `rows_per_chunk` (those formats have no sentence concept). Use `chunk_xlsx` / `chunk_csv` directly when you need explicit `rows_per_chunk` control. |
 | `paragraphs_per_page` | int | 15 | Block / paragraph quota before a page flush (`page_aware` mode). Must be `> 0`. For **PPTX** this means *slides per chunk* and the format-level default is `5`. |
-| `list_images` | bool | `False` | `get_chunks`: when `True` returns a `ChunksResult` instead of `list[dict]`. `get_markdown`: when `True` returns a `MarkdownResult` instead of `str`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, and `.htm`; all other formats return an empty `images` dict. **Not available for `stream_chunks`** — use `get_chunks(..., list_images=True)` if you need image bytes. |
+| `list_images` | bool | `False` | `get_chunks`: when `True` returns a `ChunksResult` instead of `list[dict]`. `get_markdown`: when `True` returns a `MarkdownResult` instead of `str`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm`, and `.pdf`; all other formats return an empty `images` dict. **Not available for `stream_chunks`** — use `get_chunks(..., list_images=True)` if you need image bytes. |
 
 **Returns** — `list[dict]` (batch, `list_images=False`) or `ChunksResult` (batch, `list_images=True`) or `Iterator[dict]` (streaming) or `str` / `MarkdownResult` (`get_markdown`). Each chunk dict:
 
