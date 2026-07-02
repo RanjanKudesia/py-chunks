@@ -88,6 +88,36 @@ pub(crate) fn load_doc_paragraphs(file_path: &str) -> Result<Vec<DocParagraph>, 
     ))
 }
 
+/// Like [`load_doc_paragraphs`] but keeps each paragraph's raw ordinal, so
+/// callers can interleave content anchored by raw paragraph index (used by
+/// the image-aware markdown converter).
+pub(crate) fn load_doc_paragraphs_indexed(
+    file_path: &str,
+) -> Result<Vec<(usize, DocParagraph)>, String> {
+    let word_doc = cfb_reader::read_word_document_stream(file_path)?;
+    let fib = fib::parse_fib(&word_doc)?;
+    let table = cfb_reader::read_table_stream(file_path, fib.f_which_tbl_stm)?;
+    let reconstructed = piece_table::parse_piece_table(
+        &word_doc,
+        &table,
+        fib.fc_clx,
+        fib.lcb_clx,
+        fib.ccp_text,
+    )?;
+    let stylesheet = stylesheet::parse_stylesheet(&table, fib.fc_stshf, fib.lcb_stshf)?;
+    let props = paragraph_props::parse_paragraph_props(
+        &word_doc,
+        &table,
+        fib.fc_plcf_papx,
+        fib.lcb_plcf_papx,
+    )?;
+    Ok(text_extractor::extract_paragraphs_indexed(
+        &reconstructed,
+        &props,
+        &stylesheet,
+    ))
+}
+
 pub(crate) fn build_structural_chunks(paragraphs: Vec<DocParagraph>) -> Vec<ChunkRecord> {
     let mut out = Vec::new();
     let mut short_buf = String::new();

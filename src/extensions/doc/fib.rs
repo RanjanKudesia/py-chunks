@@ -7,6 +7,15 @@ pub struct Fib {
     pub fc_stshf: u32,
     pub lcb_stshf: u32,
     pub ccp_text: i32,
+    /// PlcfBteChpx (character-run FKP index) in the table stream. Optional:
+    /// 0/0 when the FIB does not carry the entry. Used only by the image
+    /// extractor to locate inline pictures (sprmCPicLocation).
+    pub fc_plcf_bte_chpx: u32,
+    pub lcb_plcf_bte_chpx: u32,
+    /// OfficeArtContent (drawing group / blip store) in the table stream.
+    /// Optional: 0/0 when absent (document has no drawings).
+    pub fc_dgg_info: u32,
+    pub lcb_dgg_info: u32,
 }
 
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, String> {
@@ -91,6 +100,18 @@ pub fn parse_fib(word_doc: &[u8]) -> Result<Fib, String> {
     let (fc_plcf_papx, lcb_plcf_papx) = read_fc_lcb_entry(word_doc, fclcb_start, 13)?;
     let (fc_clx, lcb_clx) = read_fc_lcb_entry(word_doc, fclcb_start, 33)?;
 
+    // Optional entries: PlcfBteChpx (12) and DggInfo (50). Missing or
+    // truncated entries degrade to 0/0 — only image extraction uses them.
+    let read_optional = |index: usize| -> (u32, u32) {
+        if index < cfclcb {
+            read_fc_lcb_entry(word_doc, fclcb_start, index).unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        }
+    };
+    let (fc_plcf_bte_chpx, lcb_plcf_bte_chpx) = read_optional(12);
+    let (fc_dgg_info, lcb_dgg_info) = read_optional(50);
+
     Ok(Fib {
         f_which_tbl_stm,
         fc_clx,
@@ -100,5 +121,9 @@ pub fn parse_fib(word_doc: &[u8]) -> Result<Fib, String> {
         fc_stshf,
         lcb_stshf,
         ccp_text,
+        fc_plcf_bte_chpx,
+        lcb_plcf_bte_chpx,
+        fc_dgg_info,
+        lcb_dgg_info,
     })
 }

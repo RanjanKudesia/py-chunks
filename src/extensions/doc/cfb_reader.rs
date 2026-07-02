@@ -26,3 +26,19 @@ pub fn read_table_stream(file_path: &str, which: u8) -> Result<Vec<u8>, String> 
         .map_err(|e| format!("Failed to read {stream_name}: {e}"))?;
     Ok(buf)
 }
+
+/// Reads the optional "Data" stream, which stores inline picture data (PICF
+/// structures referenced by sprmCPicLocation). Returns `None` when the
+/// stream is absent — a document without inline pictures is not an error.
+pub fn read_data_stream(file_path: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut compound = cfb::open(file_path).map_err(|e| format!("Cannot open .doc file: {e}"))?;
+    let mut stream = match compound.open_stream("/Data") {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let mut buf = Vec::new();
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read Data stream: {e}"))?;
+    Ok(Some(buf))
+}
