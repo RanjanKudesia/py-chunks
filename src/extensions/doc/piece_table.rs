@@ -65,13 +65,27 @@ fn normalize_doc_char(ch: char) -> Option<char> {
     }
 }
 
-pub fn parse_piece_table(
-    word_doc: &[u8],
+/// One text piece from the Plcpcd: a run of `cp_end - cp_start` characters
+/// stored at byte offset `fc` in the WordDocument stream, 8-bit (cp1252)
+/// when `compressed`, UTF-16LE otherwise. `cp_end` is already clamped to
+/// `ccpText`. Semantics mirror `parse_piece_table` exactly.
+#[derive(Debug, Clone)]
+pub struct Piece {
+    pub cp_start: u32,
+    pub cp_end: u32,
+    pub fc: usize,
+    pub compressed: bool,
+}
+
+/// Parse the CLX/Plcpcd into the raw piece list without decoding text.
+/// Used by the image extractor to map file offsets (FC) to character
+/// positions (CP) and to count paragraph marks before an anchor CP.
+pub fn parse_pieces(
     table_stream: &[u8],
     fc_clx: u32,
     lcb_clx: u32,
     ccp_text: i32,
-) -> Result<ReconstructedText, String> {
+) -> Result<Vec<Piece>, String> {
     let clx_start = fc_clx as usize;
     let clx_len = lcb_clx as usize;
     let clx_end = clx_start
@@ -115,12 +129,7 @@ pub fn parse_piece_table(
 
     let plcpcd = match plcpcd {
         Some(p) => p,
-        None => {
-            return Ok(ReconstructedText {
-                text: String::new(),
-                cp_to_byte: Vec::new(),
-            });
-        }
+        None => return Ok(Vec::new()),
     };
 
     if plcpcd.len() < 4 || (plcpcd.len() - 4) % 12 != 0 {
@@ -129,10 +138,7 @@ pub fn parse_piece_table(
 
     let n = (plcpcd.len() - 4) / 12;
     if n == 0 {
-        return Ok(ReconstructedText {
-            text: String::new(),
-            cp_to_byte: Vec::new(),
-        });
+        return Ok(Vec::new());
     }
 
     let cp_count = n + 1;
@@ -148,9 +154,7 @@ pub fn parse_piece_table(
 
     let pcd_start = cp_bytes;
     let ccp_limit = ccp_text.max(0) as u32;
-
-    let mut text = String::new();
-    let mut cp_to_byte = Vec::new();
+    let mut pieces = Vec::with_capacity(n);
 
     for i in 0..n {
         let start_cp = cps[i];
@@ -170,7 +174,34 @@ pub fn parse_piece_table(
         let compressed = (fc_raw & 0x4000_0000) != 0;
         let real_offset = (fc_raw & !0x4000_0000) as usize;
 
-        if compressed {
+        pieces.push(Piece {
+            cp_start: start_cp,
+            cp_end: start_cp + char_count as u32,
+            fc: real_offset,
+            compressed,
+        });
+    }
+
+    Ok(pieces)
+}
+
+pub fn parse_piece_table(
+    word_doc: &[u8],
+    table_stream: &[u8],
+    fc_clx: u32,
+    lcb_clx: u32,
+    ccp_text: i32,
+) -> Result<ReconstructedText, String> {
+    let pieces = parse_pieces(table_stream, fc_clx, lcb_clx, ccp_text)?;
+
+    let mut text = String::new();
+    let mut cp_to_byte = Vec::new();
+
+    for piece in &pieces {
+        let char_count = (piece.cp_end - piece.cp_start) as usize;
+        let real_offset = piece.fc;
+
+        if piece.compressed {
             let end = real_offset
                 .checked_add(char_count)
                 .ok_or_else(|| "Compressed piece offset overflow".to_string())?;

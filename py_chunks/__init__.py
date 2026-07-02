@@ -21,7 +21,7 @@ from .chunkers.pdf import (
     pdf_to_markdown_with_images as _pdf_to_markdown_with_images,
     stream_chunk_pdf,
 )
-from .chunkers.ppt import chunk_ppt, ppt_to_markdown as _ppt_to_markdown, stream_chunk_ppt
+from .chunkers.ppt import chunk_ppt, chunk_ppt_with_images as _chunk_ppt_with_images, ppt_to_markdown as _ppt_to_markdown, ppt_to_markdown_with_images as _ppt_to_markdown_with_images, stream_chunk_ppt
 from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
 from .chunkers.html import (
     chunk_html,
@@ -31,7 +31,7 @@ from .chunkers.html import (
     html_to_markdown_with_images as _html_to_markdown_with_images,
 )
 from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
-from .chunkers.doc import chunk_doc, doc_to_markdown as _doc_to_markdown, stream_chunk_doc
+from .chunkers.doc import chunk_doc, chunk_doc_with_images as _chunk_doc_with_images, doc_to_markdown as _doc_to_markdown, doc_to_markdown_with_images as _doc_to_markdown_with_images, stream_chunk_doc
 from .chunkers.docx import chunk_docx, chunk_docx_with_images as _chunk_docx_with_images, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
 import os
 import sys
@@ -116,7 +116,9 @@ _MD_DISPATCH = {
 }
 
 _MD_IMAGE_DISPATCH: dict[str, Any] = {
+    ".doc":  _doc_to_markdown_with_images,
     ".docx": _docx_to_markdown_with_images,
+    ".ppt":  _ppt_to_markdown_with_images,
     ".pptx": _pptx_to_markdown_with_images,
     ".xlsx": _xlsx_to_markdown_with_images,
     ".html": _html_to_markdown_with_images,
@@ -125,7 +127,9 @@ _MD_IMAGE_DISPATCH: dict[str, Any] = {
 }
 
 _CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
+    ".doc":  _chunk_doc_with_images,
     ".docx": _chunk_docx_with_images,
+    ".ppt":  _chunk_ppt_with_images,
     ".pptx": _chunk_pptx_with_images,
     ".xlsx": _chunk_xlsx_with_images,
     ".html": _chunk_html_with_images,

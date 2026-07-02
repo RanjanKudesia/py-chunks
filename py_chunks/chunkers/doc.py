@@ -103,3 +103,70 @@ def doc_to_markdown(file_path: str) -> str:
     if path.suffix.lower() != ".doc":
         raise ValueError(f"Expected a .doc file, got: {file_path}")
     return _rust.doc_to_markdown(str(path))
+
+
+def doc_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert a .doc file to Markdown and extract embedded images."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"DOC file not found: {file_path}")
+    if path.suffix.lower() != ".doc":
+        raise ValueError(f"Expected a .doc file, got: {file_path}")
+    md, image_list = _rust.doc_to_markdown_with_images(str(path))
+    return md, dict(image_list)
+
+
+def chunk_doc_with_images(
+    file_path: str,
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk a .doc file with images extracted as dedicated chunks.
+
+    Returns (chunks, images) where images is a dict[str, bytes] mapping
+    hash-named image filenames to their raw bytes.
+    """
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"DOC file not found: {file_path}")
+    if path.suffix.lower() != ".doc":
+        raise ValueError(f"Expected a .doc file, got: {file_path}")
+    if mode not in _DOC_MODES:
+        raise ValueError(f"mode must be one of {sorted(_DOC_MODES)}")
+
+    normalized = "structural" if mode == "default" else mode
+    path_str = str(path)
+
+    if normalized == "structural":
+        chunk_list, image_list = _rust.chunk_doc_structural_with_images(path_str)
+    elif normalized == "section":
+        chunk_list, image_list = _rust.chunk_doc_section_with_images(path_str)
+    elif normalized == "semantic":
+        chunk_list, image_list = _rust.chunk_doc_semantic_with_images(path_str)
+    elif normalized == "sliding_window":
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        if overlap >= window_size:
+            raise ValueError("overlap must be less than window_size")
+        chunk_list, image_list = _rust.chunk_doc_sliding_window_with_images(
+            path_str, window_size, overlap
+        )
+    elif normalized == "sentence":
+        if sentences_per_chunk <= 0:
+            raise ValueError("sentences_per_chunk must be > 0")
+        chunk_list, image_list = _rust.chunk_doc_sentence_with_images(
+            path_str, sentences_per_chunk
+        )
+    elif normalized == "page_aware":
+        if paragraphs_per_page <= 0:
+            raise ValueError("paragraphs_per_page must be > 0")
+        chunk_list, image_list = _rust.chunk_doc_page_aware_with_images(
+            path_str, paragraphs_per_page
+        )
+    else:
+        raise ValueError(f"Unknown mode: {mode!r}")
+
+    return chunk_list, dict(image_list)

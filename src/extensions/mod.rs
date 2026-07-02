@@ -3,6 +3,7 @@ pub mod doc;
 pub mod docx;
 pub mod html;
 pub mod md;
+pub mod odraw;
 pub mod pdf;
 pub mod ppt;
 pub mod pptx;

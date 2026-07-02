@@ -49,10 +49,11 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
   - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
 - **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (12 extensions: `.doc`, `.docx`, `.pptx`, `.ppt`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
-- **Image extraction** for DOCX, PPTX, XLSX, HTML, and PDF in two modes:
+- **Image extraction** for DOCX, PPTX, XLSX, HTML, PDF, DOC, and PPT in two modes:
   - `get_chunks(..., list_images=True)` — returns a `ChunksResult` with the normal chunk list plus a `dict[str, bytes]` of every embedded image; each image also appears as a dedicated `content_type="image"` chunk whose `content` is the image's hash filename. All 7 chunking modes supported for document formats; all 6 for XLSX.
   - `get_markdown(..., list_images=True)` — returns a `MarkdownResult` with the rendered Markdown plus the same image dict. Images keyed by a stable content hash; web-renderable formats only: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`.
   - **PDF images are page-scoped**: each extracted raster is re-encoded to `.png` and tagged with the `page_number` it appears on (rather than `alt_text`), and image chunks are grouped ahead of the text chunks. Scanned / image-only PDFs (no text layer) still return their page images instead of raising.
+  - **Legacy binary formats (`.doc`, `.ppt`)**: JPEG and PNG images are decoded from the OfficeArt (MS-ODRAW) BLIP records embedded in the binary streams. `.ppt` images carry the `page_number` (slide) they appear on when it can be determined safely; `.doc` inline pictures carry a `paragraph_index` anchor. Vector/legacy raster payloads (EMF, WMF, PICT, DIB, TIFF) are silently skipped.
 - **Multiple Input Sources**: local file paths, raw `bytes` / `bytearray` / `memoryview`, file-like objects (`BytesIO`, open files), FastAPI / Starlette `UploadFile`, HTTP(S) / S3 pre-signed URLs
 - **Consistent Output Schema**: every chunk is a `dict` with `content`, `content_type`, and `metadata` keys
 - **Minimal Python dependencies**: all parsing happens in the Rust extension; PDF support uses [`pypdfium2`](https://pypi.org/project/pypdfium2/) (installed automatically), which bundles the PDFium native binary for every platform
@@ -113,7 +114,7 @@ md = get_markdown("data.csv")
 md = get_markdown("notes.txt")
 md = get_markdown(file_bytes, filename="report.pdf")  # bytes also supported
 
-# Image extraction via get_chunks — DOCX, PPTX, XLSX, HTML, and PDF
+# Image extraction via get_chunks — DOCX, PPTX, XLSX, HTML, PDF, DOC, and PPT
 from py_chunks import ChunksResult
 result = get_chunks("report.docx", list_images=True)   # returns ChunksResult
 result = get_chunks("report.docx", mode="semantic", list_images=True)
@@ -124,11 +125,13 @@ result = get_chunks("page.html",   list_images=True)   # base64 data URIs + loca
 result = get_chunks("page.html",   mode="semantic", list_images=True)
 result = get_chunks("report.pdf",  list_images=True)   # page-scoped images, re-encoded to .png
 result = get_chunks("report.pdf",  mode="page_aware", list_images=True)
+result = get_chunks("legacy.doc",  list_images=True)   # inline PICF + floating BLIP images
+result = get_chunks("deck.ppt",    list_images=True)   # Pictures stream, slide-attributed
 isinstance(result, ChunksResult)   # True
 result.chunks   # list of dicts — text chunks plus image chunks (content_type="image")
 result.images   # {"8c4a2b4ccec6f521.jpeg": b"...", ...}
 
-# Image extraction via get_markdown — DOCX, PPTX, XLSX, HTML, and PDF
+# Image extraction via get_markdown — DOCX, PPTX, XLSX, HTML, PDF, DOC, and PPT
 from py_chunks import MarkdownResult
 result = get_markdown("report.docx", list_images=True)  # returns MarkdownResult
 print(result.markdown)       # full Markdown string with ![](hash.ext) refs
@@ -137,6 +140,8 @@ result = get_markdown("deck.pptx", list_images=True)
 result = get_markdown("data.xlsx", list_images=True)    # refs added after each sheet table
 result = get_markdown("page.html", list_images=True)    # refs appended at end of markdown
 result = get_markdown("report.pdf", list_images=True)   # refs added at the top of each page
+result = get_markdown("legacy.doc", list_images=True)   # refs placed at the anchoring paragraph
+result = get_markdown("deck.ppt",  list_images=True)    # refs placed inside the owning slide
 ```
 
 ---
@@ -241,7 +246,7 @@ for chunk in stream_chunks("file.doc", mode="semantic"):
 
 > **Markdown conversion**: `get_markdown("file.doc")` converts the `.doc` to Markdown — headings become `#`/`##`/`###`, list items become `- item`, table rows become `| cell | cell |`, and page breaks become `---`.
 
-> **Image extraction**: not supported for `.doc` files. `get_chunks("file.doc", list_images=True)` returns a `ChunksResult` with an empty `images` dict — no error is raised. Convert to `.docx` first if you need image extraction.
+> **Image extraction**: all 7 DOC modes support `list_images=True`. Two storage mechanisms are covered: **inline pictures** (PICF structures in the `Data` stream, located via `sprmCPicLocation` in the character-run properties) and **floating shapes** (the OfficeArt blip store referenced by the FIB's `fcDggInfo`). Image chunks are grouped ahead of the text chunks with `content_type="image"`, `content` equal to the image's hash filename, and metadata keys `image_name` and `paragraph_index` (the raw paragraph the inline picture is anchored to, or `null` for floating/unanchored images). Only JPEG and PNG payloads are extracted; EMF/WMF/PICT/DIB/TIFF BLIPs are silently skipped. Text chunks are byte-for-byte identical to the `list_images=False` output. `get_markdown("file.doc", list_images=True)` inserts `![](hash.ext)` refs at the anchoring paragraph (unanchored images go at the end).
 
 > **Streaming**: all 7 modes are supported. `default`/`structural` use `DocStructuralIterator`; the other five modes each have a dedicated Rust iterator.
 
@@ -376,7 +381,7 @@ for chunk in stream_chunks("deck.ppt", mode="section"):
 
 > **Markdown conversion**: `get_markdown("deck.ppt")` converts the `.ppt` to Markdown — slide titles become `##`, bullets become `- item`, and slides are separated by `---`.
 
-> **Image extraction**: not supported for `.ppt` files (by design — it mirrors `.doc`). `get_chunks("deck.ppt", list_images=True)` returns a `ChunksResult` with an empty `images` dict — no error is raised. Convert to `.pptx` if you need image extraction.
+> **Image extraction**: all 7 PPT modes support `list_images=True`. Image bytes are read from the `Pictures` stream of the CFB container; each slide's shapes are matched to the OfficeArt blip store through their `Pib` properties. Image chunks are grouped ahead of the text chunks with `content_type="image"`, `content` equal to the image's hash filename, and metadata keys `image_name` and `page_number` (the 1-based slide the image appears on). Slide attribution is applied only when the slide drawings can be matched 1:1 to the extracted slide list — otherwise images are still extracted but `page_number` is `null` (never misattributed). Master/notes images are excluded. Only JPEG and PNG payloads are extracted; EMF/WMF/PICT/DIB/TIFF BLIPs are silently skipped. Text chunks are byte-for-byte identical to the `list_images=False` output. `get_markdown("deck.ppt", list_images=True)` inserts `![](hash.ext)` refs inside the owning slide's section (unattributed images go at the end).
 
 > **Streaming**: all 7 modes are supported, reusing the DOC iterators after the slide text is extracted.
 
@@ -557,9 +562,9 @@ md = get_markdown(BytesIO(data), filename="document.pdf")
 | Extension(s) | What is produced |
 |---|---|
 | `.docx` | Full fidelity: headings (`#`–`######` from Word heading styles / outline levels), unordered lists (`- item`), ordered lists (`1. item`) with per-level indentation, pipe tables, fenced code blocks, hyperlinks as `[text](url)`, page/section breaks as `---`, footnotes and endnotes as `[^id]: text` appended at the end. Images: rendered as `[Image: alt]` / `[Image]` by default; use `list_images=True` to get `![](hash.ext)` refs and the raw image bytes in `MarkdownResult.images` |
-| `.doc` | H1 → `#`, H2–H3 → `##`, H4+ → `###`; lists → `- item`; each table paragraph → pipe row with `\| --- \|` separator; page breaks → `---`; plain paragraphs as-is |
+| `.doc` | H1 → `#`, H2–H3 → `##`, H4+ → `###`; lists → `- item`; each table paragraph → pipe row with `\| --- \|` separator; page breaks → `---`; plain paragraphs as-is. Images: ignored by default; use `list_images=True` to get `![](hash.ext)` refs at the anchoring paragraph and raw JPEG/PNG bytes in `MarkdownResult.images` |
 | `.pptx` | Presentation title → `# Title`; PPTX sections → `# Section Name`; each slide → `## Slide N: Title` (or `## Slide N`); paragraphs as plain text; unordered bullets (`- item`) and ordered bullets (`1. item`) with per-level indentation; pipe tables; speaker notes as `> **Notes:** …`; slides/sections separated by `---`. Images: rendered as `[Image: alt]` by default; use `list_images=True` to get `![](hash.ext)` refs and the raw image bytes in `MarkdownResult.images` |
-| `.ppt` | Slide titles → `##`; body placeholders → `- item` bullets (multi-line) or prose; slides separated by `---`. Freeform text boxes are included. Image extraction is not supported (returns no images). |
+| `.ppt` | Slide titles → `##`; body placeholders → `- item` bullets (multi-line) or prose; slides separated by `---`. Freeform text boxes are included. Images: ignored by default; use `list_images=True` to get `![](hash.ext)` refs inside the owning slide and raw JPEG/PNG bytes in `MarkdownResult.images` |
 | `.pdf` | Headings inferred from font size vs document average → `#` / `##` / `###`; bullet lists preserved or normalized to `- item`; tables detected by tab/multi-space alignment → pipe tables; page boundaries → `---`. Images: ignored by default; use `list_images=True` to get `![](hash.png)` refs at the top of each page and the raw PNG bytes in `MarkdownResult.images` |
 | `.html`, `.htm` | H1–H6 → `#`–`######`; paragraphs as plain text; ordered lists → `1. item`; unordered lists → `- item`; code blocks → fenced ` ``` `; pipe tables with auto-detected header row; `\|` in cells escaped. Images: ignored by default; use `list_images=True` to extract base64 data URIs and local file references as `![alt](hash.ext)` refs appended at the end, plus raw bytes in `MarkdownResult.images` |
 | `.xlsx`, `.xls` | Each non-empty sheet → `## SheetName` heading + pipe table; sheets separated by `---`. Images: ignored by default; use `list_images=True` to get `![](hash.ext)` refs after each sheet table and raw bytes in `MarkdownResult.images` (XLSX only; XLS returns `images={}`). |
@@ -581,7 +586,7 @@ get_markdown(source, *, filename: str | None = None, list_images: bool = True) -
 |---|---|---|
 | `source` | str, Path, bytes, bytearray, memoryview, file-like | Document source. Local file path, raw bytes, or file-like object. |
 | `filename` | str \| None | Required when source is `bytes`, `bytearray`, `memoryview`, or a file-like object without a `.name` attribute. |
-| `list_images` | bool | `False` (default) returns a plain `str`. `True` returns a `MarkdownResult`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm`, and `.pdf`; other formats return an empty `images` dict. |
+| `list_images` | bool | `False` (default) returns a plain `str`. `True` returns a `MarkdownResult`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm`, `.pdf`, `.doc`, and `.ppt`; other formats return an empty `images` dict. |
 
 **Return types**
 
@@ -612,15 +617,16 @@ Image chunks inside `ChunksResult.chunks` have `content_type="image"`, `content`
 @dataclass
 class MarkdownResult:
     markdown: str             # full Markdown string; images referenced as ![](hash.ext)
-    images: dict[str, bytes]  # {filename: raw_bytes} — populated for .docx, .pptx, .xlsx, .html/.htm, .pdf
+    images: dict[str, bytes]  # {filename: raw_bytes} — populated for .docx, .pptx, .xlsx, .html/.htm, .pdf, .doc, .ppt
 ```
 
-**Image extraction details (DOCX / PPTX / XLSX / HTML / PDF)**
+**Image extraction details (DOCX / PPTX / XLSX / HTML / PDF / DOC / PPT)**
 
 - Each embedded image is hashed (content hash, not path) and named `{16-char hex}.{ext}`, e.g. `8c4a2b4ccec6f521.png`.
 - The same hash means the same file: if an image appears multiple times in the document it is stored once in `images` but referenced at every occurrence in `markdown`.
 - For DOCX / PPTX / XLSX / HTML, only web-renderable formats are extracted: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`. Vector/metafile formats (`.emf`, `.wmf`, etc.) are silently skipped.
 - For **PDF**, each image is decoded and re-encoded to `.png` regardless of how it was stored, so every key in `images` ends in `.png`. References are placed at the top of each page's Markdown, and scanned/image-only PDFs still yield one PNG per page.
+- For legacy **DOC / PPT**, images are decoded from the OfficeArt (MS-ODRAW) BLIP records in the binary streams; only JPEG and PNG payloads are supported (EMF/WMF/PICT/DIB/TIFF are silently skipped). `.doc` refs are placed at the anchoring paragraph; `.ppt` refs inside the owning slide; unanchored images go at the end.
 - Image references in `markdown` use `![](hash.ext)` — you can serve or embed the corresponding bytes directly.
 
 **Raises**
@@ -850,7 +856,7 @@ get_markdown(
 | `overlap` | int | 1 | Overlapping blocks between windows (`sliding_window` mode). Must be `< window_size`. |
 | `sentences_per_chunk` | int | 3 | Sentences per chunk (`sentence` mode). Must be `> 0`. **For XLSX / XLS and CSV** via the unified API, this value is re-used as `rows_per_chunk` (those formats have no sentence concept). Use `chunk_xlsx` / `chunk_csv` directly when you need explicit `rows_per_chunk` control. |
 | `paragraphs_per_page` | int | 15 | Block / paragraph quota before a page flush (`page_aware` mode). Must be `> 0`. For **PPTX** this means *slides per chunk* and the format-level default is `5`. |
-| `list_images` | bool | `False` | `get_chunks`: when `True` returns a `ChunksResult` instead of `list[dict]`. `get_markdown`: when `True` returns a `MarkdownResult` instead of `str`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm`, and `.pdf`; all other formats return an empty `images` dict. **Not available for `stream_chunks`** — use `get_chunks(..., list_images=True)` if you need image bytes. |
+| `list_images` | bool | `False` | `get_chunks`: when `True` returns a `ChunksResult` instead of `list[dict]`. `get_markdown`: when `True` returns a `MarkdownResult` instead of `str`. Image extraction is active for `.docx`, `.pptx`, `.xlsx`, `.html`, `.htm`, `.pdf`, `.doc`, and `.ppt`; all other formats return an empty `images` dict. **Not available for `stream_chunks`** — use `get_chunks(..., list_images=True)` if you need image bytes. |
 
 **Returns** — `list[dict]` (batch, `list_images=False`) or `ChunksResult` (batch, `list_images=True`) or `Iterator[dict]` (streaming) or `str` / `MarkdownResult` (`get_markdown`). Each chunk dict:
 

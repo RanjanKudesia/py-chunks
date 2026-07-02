@@ -107,7 +107,11 @@ struct Run {
     txtype: Option<u32>,
 }
 
-pub fn extract_paragraphs(stream: &[u8]) -> Vec<DocParagraph> {
+/// Per-slide paragraph lists, in presentation (SLWT) order when a central
+/// slide list exists, otherwise in slide-drawing (Escher) order. This is the
+/// pre-flattening view used by the image extractor to attribute images to
+/// slides; `extract_paragraphs` flattens it.
+pub fn extract_slides(stream: &[u8]) -> Vec<Vec<DocParagraph>> {
     // Per-slide paragraph lists from the slides SlideListWithText.
     let mut slides: Vec<Vec<DocParagraph>> = Vec::new();
     collect_slwt_slides(stream, 0, stream.len(), &mut slides);
@@ -129,6 +133,11 @@ pub fn extract_paragraphs(stream: &[u8]) -> Vec<DocParagraph> {
             }
         }
     }
+    slides
+}
+
+pub fn extract_paragraphs(stream: &[u8]) -> Vec<DocParagraph> {
+    let slides = extract_slides(stream);
 
     // Flatten with PageBreak separators between non-empty slides.
     let mut out: Vec<DocParagraph> = Vec::new();

@@ -70,6 +70,22 @@ pub fn extract_paragraphs(
     props: &[ParagraphProp],
     stylesheet: &StyleSheet,
 ) -> Vec<DocParagraph> {
+    extract_paragraphs_indexed(reconstructed, props, stylesheet)
+        .into_iter()
+        .map(|(_, p)| p)
+        .collect()
+}
+
+/// Like [`extract_paragraphs`] but each paragraph carries the index of the
+/// raw `\r`-separated paragraph it came from (empty paragraphs are skipped,
+/// so output indices are sparse). Used by the image extractor to anchor
+/// inline pictures — whose position is known as a raw paragraph ordinal —
+/// to the surviving paragraph stream.
+pub fn extract_paragraphs_indexed(
+    reconstructed: &ReconstructedText,
+    props: &[ParagraphProp],
+    stylesheet: &StyleSheet,
+) -> Vec<(usize, DocParagraph)> {
     let raw_paragraphs: Vec<&str> = reconstructed.text.split('\r').collect();
     let mut out = Vec::new();
 
@@ -77,11 +93,14 @@ pub fn extract_paragraphs(
         let prop = props.get(idx);
 
         if raw == &"\x0C" || raw.starts_with('\x0C') {
-            out.push(DocParagraph {
-                content: String::new(),
-                paragraph_type: ParagraphType::PageBreak,
-                heading_level: None,
-            });
+            out.push((
+                idx,
+                DocParagraph {
+                    content: String::new(),
+                    paragraph_type: ParagraphType::PageBreak,
+                    heading_level: None,
+                },
+            ));
             continue;
         }
 
@@ -140,11 +159,14 @@ pub fn extract_paragraphs(
             heading_level = Some(2);
         }
 
-        out.push(DocParagraph {
-            content,
-            paragraph_type,
-            heading_level,
-        });
+        out.push((
+            idx,
+            DocParagraph {
+                content,
+                paragraph_type,
+                heading_level,
+            },
+        ));
     }
 
     out
