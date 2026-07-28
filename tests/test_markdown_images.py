@@ -6,20 +6,16 @@ import pytest
 from py_chunks import MarkdownResult, get_markdown
 
 
-DOCX_FIXTURE = Path("tests/fixtures/sample.docx")
-PPTX_FIXTURE = Path("tests/fixtures/sample.pptx")
+# Real fixtures live at <repo>/test_files. Pick image-bearing docx/pptx so the
+# image-reference assertions actually exercise, not just the empty-image path.
+_TEST_FILES = Path(__file__).resolve().parents[2] / "test_files"
+DOCX_FIXTURE = _TEST_FILES / "docx" / "all_round.docx"
+PPTX_FIXTURE = _TEST_FILES / "pptx" / "sample.pptx"
 
 
 def _first_existing_pdf() -> Path | None:
-    candidates = [
-        Path("tests/fixtures/sample.pdf"),
-        Path("tests/fixtures/test.pdf"),
-        Path("test_files/test.pdf"),
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
+    candidates = sorted((_TEST_FILES / "pdf").glob("*.pdf"))
+    return candidates[0] if candidates else None
 
 
 PDF_FIXTURE = _first_existing_pdf()

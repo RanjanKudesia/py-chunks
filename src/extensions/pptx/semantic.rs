@@ -121,11 +121,10 @@ impl SemAccum {
             for &r in &self.merge_reasons {
                 *counts.entry(r).or_default() += 1;
             }
-            let p = counts
-                .iter()
-                .max_by_key(|(_, v)| *v)
-                .map(|(k, _)| *k)
-                .unwrap_or("keyword_overlap");
+            // Sort by (count desc, key asc) for determinism when counts are tied.
+            let mut reason_vec: Vec<(&'static str, usize)> = counts.into_iter().collect();
+            reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            let p = reason_vec.first().map(|(k, _)| *k).unwrap_or("keyword_overlap");
             (p, self.merge_reasons)
         };
         ChunkRecordInput {
@@ -307,9 +306,10 @@ pub fn build_semantic_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, Stri
 
 #[pyfunction]
 pub fn chunk_pptx_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes =
@@ -338,9 +338,10 @@ pub fn chunk_pptx_semantic_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes =

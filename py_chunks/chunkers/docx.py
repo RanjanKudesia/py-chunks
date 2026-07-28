@@ -6,6 +6,7 @@ from pathlib import Path
 from py_chunks import _rust
 
 
+_DOCX_SUFFIXES = (".docx", ".docm", ".dotx", ".dotm")
 _DOCX_MODES = {
     "default",
     "structural",
@@ -28,8 +29,9 @@ def _validate_docx_args(
 ) -> str:
     if not path.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() != ".docx":
-        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
     if mode not in _DOCX_MODES:
         raise ValueError(
             "mode must be 'default', 'structural', 'section', 'semantic', 'sliding_window', 'sentence', or 'page_aware'"
@@ -156,8 +158,9 @@ def stream_chunk_docx(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() != ".docx":
-        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
 
     if mode not in {"default", "structural", "semantic", "section", "sliding_window", "sentence", "page_aware"}:
         raise NotImplementedError(f"Streaming for {mode} mode coming soon")
@@ -187,8 +190,9 @@ def docx_to_markdown(file_path: str) -> str:
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() != ".docx":
-        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
     return _rust.docx_to_markdown(str(path))
 
 
@@ -197,8 +201,9 @@ def docx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() != ".docx":
-        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
     md, image_list = _rust.docx_to_markdown_with_images(str(path))
     return md, dict(image_list)
 
@@ -219,8 +224,9 @@ def chunk_docx_with_images(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() != ".docx":
-        raise ValueError(f"Expected a .docx file, got: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
 
     normalized_mode = "structural" if mode == "default" else mode
     path_str = str(path)

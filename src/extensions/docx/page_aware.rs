@@ -38,9 +38,10 @@ fn chunk_docx_page_aware(
     file_path: &str,
     paragraphs_per_page: usize,
 ) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if paragraphs_per_page == 0 {
@@ -81,9 +82,10 @@ fn chunk_docx_page_aware_with_images(
     file_path: &str,
     paragraphs_per_page: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if paragraphs_per_page == 0 {
@@ -416,9 +418,10 @@ fn chunk_docx_page_aware_stream(
     file_path: &str,
     paragraphs_per_page: usize,
 ) -> PyResult<DocxPageAwareIterator> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if paragraphs_per_page == 0 {

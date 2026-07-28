@@ -9,7 +9,7 @@
 ///
 /// Parity guarantee: yields identical content and metadata to the
 /// corresponding batch function for every mode.
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{Data, Reader};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -83,7 +83,7 @@ fn parse_sheets_for_streaming(
     skip_empty_rows: bool,
 ) -> Result<Vec<SheetData>, String> {
     let mut workbook =
-        open_workbook_auto(file_path).map_err(|e| format!("Failed to open workbook: {e}"))?;
+        super::common::open_spreadsheet(file_path)?;
 
     let workbook_sheet_names = workbook.sheet_names().to_vec();
     let selected_sheets = if sheet_names.is_empty() {
@@ -104,9 +104,7 @@ fn parse_sheets_for_streaming(
             .position(|n| n == &sheet_name)
             .unwrap_or(0);
 
-        let range = workbook
-            .worksheet_range(&sheet_name)
-            .map_err(|e| format!("Failed to read sheet '{sheet_name}': {e}"))?;
+        let range = super::common::read_worksheet_range(&mut workbook, &sheet_name)?;
         let base_row_index = range.start().map(|(r, _)| r as usize).unwrap_or(0);
 
         let rows: Vec<&[Data]> = range.rows().collect();
@@ -121,7 +119,20 @@ fn parse_sheets_for_streaming(
 
         let header_row_index = detect_header_row(&rows);
         let headers = build_headers_from_rows(&rows, header_row_index, col_count);
-        let data_start = header_row_index.map_or(0, |i| i + 1);
+        let mut data_start = header_row_index.map_or(0, |i| i + 1);
+
+        // F2 guard (parity with batch build_row_chunks): if every row was consumed
+        // as the header (no data rows follow), fall back to emitting the header row
+        // as content rather than silently dropping the sheet.
+        let has_data_rows = rows
+            .iter()
+            .skip(data_start)
+            .any(|row| !(skip_empty_rows && row_is_empty_public(&row_slice_owned(row, col_count))));
+        if !has_data_rows {
+            if let Some(hidx) = header_row_index {
+                data_start = hidx;
+            }
+        }
 
         let mut data_rows: Vec<(usize, Vec<Data>)> = Vec::new();
         for (row_index, row) in rows.iter().enumerate().skip(data_start) {
@@ -394,10 +405,10 @@ pub fn stream_xlsx_chunks(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<Py<XlsxStreamIterator>> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
     if (mode == "row" || mode == "semantic") && rows_per_chunk == 0 {

@@ -6,6 +6,7 @@ from pathlib import Path
 from py_chunks import _rust
 
 _CSV_MODES = {"row", "default", "sliding_window", "page_aware"}
+_CSV_SUFFIXES = (".csv", ".tsv")
 
 
 def _parse_delimiter(delimiter: str | None) -> int | None:
@@ -33,8 +34,9 @@ def _validate_csv_args(
 ) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"CSV file not found: {file_path}")
-    if path.suffix.lower() != ".csv":
-        raise ValueError(f"Expected a .csv file, got: {file_path}")
+    if path.suffix.lower() not in _CSV_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_CSV_SUFFIXES)}, got: {file_path}")
     if mode not in _CSV_MODES:
         raise ValueError(f"mode must be one of {sorted(_CSV_MODES)} for CSV, got: '{mode}'")
     if rows_per_chunk < 1:
@@ -125,8 +127,11 @@ def csv_to_markdown(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"CSV file not found: {file_path}")
-    if path.suffix.lower() != ".csv":
-        raise ValueError(f"Expected a .csv file, got: {file_path}")
+    if path.suffix.lower() not in _CSV_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_CSV_SUFFIXES)}, got: {file_path}")
+    if delimiter is None and path.suffix.lower() == ".tsv":
+        delimiter = "\t"
     return _rust.csv_to_markdown(
         str(path),
         delimiter=_parse_delimiter(delimiter),

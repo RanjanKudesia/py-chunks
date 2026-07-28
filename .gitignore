@@ -19,3 +19,6 @@ target/
 .venv/
 venv/
 tests/dist/
+
+# Local AI working-instructions file — not part of the published project
+CLAUDE.md

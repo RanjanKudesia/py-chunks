@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{Data, Reader};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -61,7 +61,7 @@ pub fn build_sheet_chunks(
     }
 
     let mut workbook =
-        open_workbook_auto(file_path).map_err(|e| format!("Failed to open workbook: {e}"))?;
+        super::common::open_spreadsheet(file_path)?;
 
     let workbook_sheet_names = workbook.sheet_names().to_vec();
     let selected_sheets = if sheet_names.is_empty() {
@@ -84,9 +84,7 @@ pub fn build_sheet_chunks(
             .position(|name| name == &sheet_name)
             .unwrap_or(0);
 
-        let range = workbook
-            .worksheet_range(&sheet_name)
-            .map_err(|e| format!("Failed to read sheet '{sheet_name}': {e}"))?;
+        let range = super::common::read_worksheet_range(&mut workbook, &sheet_name)?;
 
         let rows: Vec<&[Data]> = range.rows().collect();
         if rows.is_empty() {
@@ -119,7 +117,19 @@ pub fn build_sheet_chunks(
             data_lines.push(line);
         }
 
-        let table_names = get_named_table_names_for_sheet(file_path, sheet_index + 1)?;
+        // F2 guard: if the only content was consumed as a header (e.g. a single
+        // merged title cell), don't emit an empty sheet — surface that content.
+        if data_lines.is_empty() {
+            if let Some(hrow) = header_row_index.and_then(|idx| rows.get(idx)) {
+                let values = row_slice_with_fill(hrow, col_count);
+                if !row_is_empty_public(&values) {
+                    data_lines.push(serialize_row_values_public(&values, col_count));
+                }
+            }
+        }
+
+        let table_names =
+            get_named_table_names_for_sheet(file_path, sheet_index + 1, &sheet_name)?;
         let split_parts = split_content_lines(data_lines, max_chunk_chars);
         let is_split = split_parts.len() > 1;
 
@@ -162,10 +172,10 @@ pub fn chunk_xlsx_sheet(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<PyObject> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
     if max_chunk_chars == 0 {

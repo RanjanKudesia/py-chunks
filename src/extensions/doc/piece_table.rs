@@ -1,5 +1,8 @@
 pub struct ReconstructedText {
     pub text: String,
+    /// CP→byte-offset map built during piece-table reconstruction; retained for
+    /// future character-position mapping (e.g. field/bookmark spans), not yet read.
+    #[allow(dead_code)]
     pub cp_to_byte: Vec<usize>,
 }
 
@@ -60,7 +63,11 @@ fn normalize_doc_char(ch: char) -> Option<char> {
         '\x07' => Some('\x07'),
         '\x0C' => Some('\x0C'),
         '\x0B' => Some('\n'),
-        '\x01'..='\x06' | '\x08'..='\x09' | '\x0E'..='\x1F' => None,
+        // Drop NUL and all non-text C0/DEL control characters. NUL in particular
+        // is never document text — some `.doc` files (e.g. large ones padded to
+        // size) have piece-table runs pointing at NUL padding, which must not
+        // leak into the extracted text as an unsplittable binary blob.
+        '\x00'..='\x06' | '\x08'..='\x09' | '\x0E'..='\x1F' | '\x7F' => None,
         other => Some(other),
     }
 }

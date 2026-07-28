@@ -44,7 +44,7 @@ pub fn build_sliding_window_chunks(
     }
 
     if units.is_empty() {
-        return Err("No text content found".to_string());
+        return Ok(Vec::new());
     }
 
     let step = window_size - overlap;
@@ -62,9 +62,11 @@ pub fn build_sliding_window_chunks(
             .join("\n\n");
         // Safety cap: prevent unbounded output for very large window_size values.
         let (content, truncated) = if raw_content.len() > MAX_WINDOW_CONTENT_CHARS {
-            let truncate_at = raw_content[..MAX_WINDOW_CONTENT_CHARS]
+            let budget = crate::extensions::shared::floor_char_boundary(
+                &raw_content, MAX_WINDOW_CONTENT_CHARS);
+            let truncate_at = raw_content[..budget]
                 .rfind([' ', '\n'])
-                .unwrap_or(MAX_WINDOW_CONTENT_CHARS);
+                .unwrap_or(budget);
             (raw_content[..truncate_at].trim_end().to_string(), true)
         } else {
             (raw_content, false)
@@ -105,9 +107,10 @@ pub fn chunk_pptx_sliding_window(
     window_size: usize,
     overlap: usize,
 ) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     if window_size == 0 {
@@ -144,9 +147,10 @@ pub fn chunk_pptx_sliding_window_with_images(
     window_size: usize,
     overlap: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     if window_size == 0 {

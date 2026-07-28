@@ -7,6 +7,23 @@ use serde_json::{json, Value};
 use std::io::{BufReader, Cursor, Read};
 use zip::ZipArchive;
 
+/// Every PresentationML OOXML extension routed through the pptx chunker. All
+/// store slides under `ppt/slides/`, which the parser enumerates by part name
+/// regardless of extension. NOTE: legacy binary `.ppt` is NOT here — it routes
+/// to the separate `ppt` chunker.
+pub const PPTX_OOXML_EXTS: &[&str] = &[".pptx", ".potx", ".potm", ".ppsx", ".ppsm"];
+
+/// True if `path` ends in any supported PresentationML OOXML extension.
+pub fn is_pptx_ooxml(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    PPTX_OOXML_EXTS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Human-readable extension list for error messages.
+pub fn pptx_exts_display() -> String {
+    PPTX_OOXML_EXTS.join(", ")
+}
+
 // Re-export shared utilities so strategy files can keep importing from super::common.
 pub use super::super::shared::{has_keyword_overlap, split_sentences, tokenize_keywords};
 
@@ -105,13 +122,6 @@ fn find_notes_for_slide(archive: &mut PptxArchive, slide_name: &str) -> Option<S
     None
 }
 
-pub(super) fn find_notes_for_slide_pub(
-    archive: &mut PptxArchive,
-    slide_name: &str,
-) -> Option<String> {
-    find_notes_for_slide(archive, slide_name)
-}
-
 /// Extracts text from a notes-slide XML.  Reuses the slide parser; body
 /// paragraphs contain the speaker notes (the title slot holds the image).
 pub(super) fn parse_notes_xml(xml_bytes: &[u8]) -> Option<String> {
@@ -145,7 +155,6 @@ pub enum ContentType {
     SlidingWindow,
     Sentence,
     PageAware,
-    Image,
 }
 
 impl ContentType {
@@ -162,7 +171,6 @@ impl ContentType {
             ContentType::SlidingWindow => "sliding_window",
             ContentType::Sentence => "sentence",
             ContentType::PageAware => "page_aware",
-            ContentType::Image => "image",
         }
     }
 }
@@ -698,10 +706,13 @@ pub fn split_large_text(text: &str, max_chars: usize) -> Vec<String> {
             }
             current = sentence;
             while current.len() > max_chars {
-                let split_at = current[..max_chars]
+                let budget = crate::extensions::shared::floor_char_boundary(&current, max_chars);
+                let split_at = current[..budget]
                     .rfind(' ')
-                    .unwrap_or(max_chars / 2)
-                    .max(max_chars / 2);
+                    .map(|i| i + 1)
+                    .unwrap_or(budget)
+                    .max(1);
+                let split_at = crate::extensions::shared::floor_char_boundary(&current, split_at);
                 chunks.push(current[..split_at].trim().to_string());
                 current = current[split_at..].trim().to_string();
             }

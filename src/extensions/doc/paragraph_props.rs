@@ -3,8 +3,14 @@ pub struct ParagraphProp {
     pub start_cp: u32,
     pub istd: u16,
     pub f_in_table: bool,
+    /// Parsed from sprmPFPageBreakBefore; retained for future page-aware
+    /// chunking of legacy `.doc`, not yet consumed by the chunker.
+    #[allow(dead_code)]
     pub page_break_before: bool,
     pub ilfo: u16,
+    /// List nesting level (sprmPIlvl); parsed for structural fidelity, reserved
+    /// for future list-depth rendering.
+    #[allow(dead_code)]
     pub ilvl: u8,
 }
 
@@ -12,11 +18,6 @@ const SPRM_P_F_IN_TABLE: u16 = 0x2416;
 const SPRM_P_F_PAGE_BREAK_BEFORE: u16 = 0x2407;
 const SPRM_P_ILFO: u16 = 0x460B;
 const SPRM_P_ILVL: u16 = 0x260A;
-
-fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
-    data.get(offset..offset + 2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-}
 
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     data.get(offset..offset + 4)

@@ -4,7 +4,7 @@ from pathlib import Path
 from py_chunks import _MD_DISPATCH, get_markdown
 from py_chunks.chunkers.doc import doc_to_markdown
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+FIXTURES_DIR = Path(__file__).resolve().parents[2] / "test_files" / "doc"
 SAMPLE_DOC = FIXTURES_DIR / "sample.doc"
 HAS_SAMPLE = SAMPLE_DOC.exists()
 

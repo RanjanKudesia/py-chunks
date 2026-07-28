@@ -123,7 +123,6 @@ fn parse_slide_for_markdown(
 
     // Shape tracking
     let mut sp_depth: i32 = 0;
-    let mut grp_depth: i32 = 0; // depth of nested <p:grpSp>
     let mut sp_is_title = false;
     let mut sp_ph_checked = false;
     let mut in_pic = false;
@@ -176,9 +175,9 @@ fn parse_slide_for_markdown(
                 let local: &[u8] = ebytes.rsplit(|b| *b == b':').next().unwrap_or(ebytes);
 
                 match local {
-                    b"grpSp" => {
-                        grp_depth += 1;
-                    }
+                    // Group shapes are traversed transparently; the tag itself
+                    // needs no state — shapes inside are handled as normal.
+                    b"grpSp" => {}
                     b"sp" => {
                         sp_depth += 1;
                         if sp_depth == 1 {
@@ -534,9 +533,7 @@ fn parse_slide_for_markdown(
                 let local: &[u8] = ebytes.rsplit(|b| *b == b':').next().unwrap_or(ebytes);
 
                 match local {
-                    b"grpSp" => {
-                        grp_depth -= 1;
-                    }
+                    b"grpSp" => {}
                     b"r" if in_para => {
                         if !cur_run_text.is_empty() {
                             let formatted = match (cur_bold, cur_italic) {
@@ -1123,9 +1120,10 @@ fn presentation_to_markdown(
 
 #[pyfunction]
 pub fn pptx_to_markdown(file_path: &str) -> PyResult<String> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
 
@@ -1155,9 +1153,10 @@ pub fn pptx_to_markdown(file_path: &str) -> PyResult<String> {
 
 #[pyfunction]
 pub fn pptx_to_markdown_with_images(py: Python<'_>, file_path: &str) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
 

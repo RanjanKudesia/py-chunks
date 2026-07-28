@@ -14,7 +14,7 @@ use super::paragraph_props;
 use super::piece_table;
 use super::stylesheet;
 use super::text_extractor::{self, DocParagraph, ParagraphType};
-use crate::extensions::shared::{split_sentences, STOPWORDS};
+use crate::extensions::shared::{floor_char_boundary, split_at_sentences, split_sentences, STOPWORDS};
 
 const MAX_CHUNK_CHARS: usize = 1200;
 const MAX_SECTION_CHARS: usize = 2000;
@@ -118,6 +118,45 @@ pub(crate) fn load_doc_paragraphs_indexed(
     ))
 }
 
+/// Split an oversized paragraph so no chunk exceeds `max_chars`. Prefers
+/// sentence boundaries; any residual piece still over the limit (text with no
+/// detectable sentence boundaries) is hard-split at UTF-8 char boundaries so the
+/// cap is always honoured.
+fn split_oversized(text: &str, max_chars: usize) -> Vec<String> {
+    if text.len() <= max_chars {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    for piece in split_at_sentences(text, max_chars) {
+        if piece.len() <= max_chars {
+            if !piece.is_empty() {
+                out.push(piece);
+            }
+            continue;
+        }
+        let bytes = piece.as_bytes();
+        let mut start = 0usize;
+        while start < bytes.len() {
+            let mut end = (start + max_chars).min(piece.len());
+            end = floor_char_boundary(&piece, end);
+            if end <= start {
+                // max_chars smaller than a single char; advance to next boundary.
+                end = floor_char_boundary(&piece, start + 4).max(start + 1).min(piece.len());
+            }
+            let slice = piece[start..end].trim();
+            if !slice.is_empty() {
+                out.push(slice.to_string());
+            }
+            start = end;
+        }
+    }
+    if out.is_empty() {
+        vec![text.trim().to_string()]
+    } else {
+        out
+    }
+}
+
 pub(crate) fn build_structural_chunks(paragraphs: Vec<DocParagraph>) -> Vec<ChunkRecord> {
     let mut out = Vec::new();
     let mut short_buf = String::new();
@@ -178,13 +217,20 @@ pub(crate) fn build_structural_chunks(paragraphs: Vec<DocParagraph>) -> Vec<Chun
             short_buf.clear();
         }
 
-        out.push(ChunkRecord {
-            content: trimmed.to_string(),
-            content_type: content_type_for_paragraph(&p.paragraph_type, false),
-            chunk_index: 0,
-            heading_level: p.heading_level,
-            paragraph_type: paragraph_type_str(&p.paragraph_type),
-        });
+        let content_type = content_type_for_paragraph(&p.paragraph_type, false);
+        let paragraph_type = paragraph_type_str(&p.paragraph_type);
+        // A single paragraph can exceed MAX_CHUNK_CHARS (e.g. a document with no
+        // paragraph breaks). Split it so we never emit an unsplittable mega-chunk,
+        // mirroring how the docx chunker recursively splits oversized paragraphs.
+        for piece in split_oversized(trimmed, MAX_CHUNK_CHARS) {
+            out.push(ChunkRecord {
+                content: piece,
+                content_type,
+                chunk_index: 0,
+                heading_level: p.heading_level,
+                paragraph_type,
+            });
+        }
     }
 
     if !short_buf.is_empty() {
@@ -232,7 +278,13 @@ pub(crate) fn build_section_chunks(paragraphs: Vec<DocParagraph>) -> Vec<ChunkRe
 
         let mut start = 0usize;
         while start < joined.len() {
-            let end = (start + MAX_SECTION_CHARS).min(joined.len());
+            // Snap to a UTF-8 char boundary so multi-byte content (e.g. '÷', CJK)
+            // never triggers a mid-character slice panic on very large sections.
+            let raw_end = (start + MAX_SECTION_CHARS).min(joined.len());
+            let mut end = floor_char_boundary(&joined, raw_end);
+            if end <= start {
+                end = joined.len();
+            }
             let part = joined[start..end].trim().to_string();
             if !part.is_empty() {
                 out.push(ChunkRecord {

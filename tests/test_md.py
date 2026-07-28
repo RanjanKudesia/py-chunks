@@ -22,6 +22,8 @@ from py_chunks.chunkers.md import chunk_md, stream_chunk_md
 _CANDIDATE_DIRS = [
     Path(__file__).resolve().parents[2] / "test_files",
     Path(__file__).resolve().parents[2] / "test_input_files",
+    # Fixtures were reorganised into per-format subdirectories.
+    Path(__file__).resolve().parents[2] / "test_files" / "md",
 ]
 
 _MD_NAMES = ["code_heavy.md", "prose_heavy.md", "test.md"]

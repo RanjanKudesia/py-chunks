@@ -28,9 +28,10 @@ fn chunk_docx_sliding_window(
     window_size: usize,
     overlap: usize,
 ) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if window_size == 0 {
@@ -75,9 +76,10 @@ fn chunk_docx_sliding_window_with_images(
     window_size: usize,
     overlap: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if window_size == 0 {
@@ -282,9 +284,10 @@ fn chunk_docx_sliding_window_stream(
     window_size: usize,
     overlap: usize,
 ) -> PyResult<DocxSlidingWindowIterator> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if window_size == 0 {

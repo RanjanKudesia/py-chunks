@@ -130,6 +130,20 @@ pub const SHORT_PARA_CHARS: usize = 80;
 ///
 /// Uses `str::get` so it never panics on non-char-boundary slices.
 #[inline]
+/// Largest index <= `idx` that is a UTF-8 char boundary of `s`. Prevents a
+/// panic when splitting a string on a byte budget that lands inside a multibyte
+/// character (e.g. Cyrillic/CJK text at a chunk-size cutoff).
+pub fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    let mut i = idx;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 pub fn ci_starts_with(text: &str, prefix: &str) -> bool {
     text.get(..prefix.len())
         .map(|s| s.eq_ignore_ascii_case(prefix))

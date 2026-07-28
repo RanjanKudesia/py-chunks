@@ -240,11 +240,10 @@ fn finalize(
                 *counts.entry(part.merge_reason).or_default() += 1;
             }
         }
-        counts
-            .into_iter()
-            .max_by_key(|(_, c)| *c)
-            .map(|(r, _)| r)
-            .unwrap_or("keyword_overlap")
+        // Sort by (count desc, key asc) for determinism when counts are tied.
+        let mut reason_vec: Vec<(&'static str, usize)> = counts.into_iter().collect();
+        reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        reason_vec.first().map(|(r, _)| *r).unwrap_or("keyword_overlap")
     };
 
     let has_list = accum

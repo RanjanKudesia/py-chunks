@@ -46,9 +46,10 @@ fn chunk_docx_sentence(
     file_path: &str,
     sentences_per_chunk: usize,
 ) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if sentences_per_chunk == 0 {
@@ -93,9 +94,10 @@ fn chunk_docx_sentence_with_images(
     file_path: &str,
     sentences_per_chunk: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if sentences_per_chunk == 0 {
@@ -428,9 +430,10 @@ fn chunk_docx_sentence_stream(
     file_path: &str,
     sentences_per_chunk: usize,
 ) -> PyResult<DocxSentenceIterator> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
     if sentences_per_chunk == 0 {

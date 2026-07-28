@@ -3,7 +3,7 @@ use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use super::chunker::{delimiter_byte, is_empty_row, normalize_headers};
+use super::chunker::{is_empty_row, normalize_headers};
 use super::common::{detect_delimiter, read_first_data_line, read_to_utf8};
 
 #[pyfunction]
@@ -19,9 +19,9 @@ pub fn csv_to_markdown(file_path: &str, delimiter: Option<u8>, encoding: &str) -
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase());
-    if ext.as_deref() != Some("csv") {
+    if !matches!(ext.as_deref(), Some("csv") | Some("tsv")) {
         return Err(PyValueError::new_err(format!(
-            "Expected a .csv file, got: {file_path}"
+            "Expected a .csv or .tsv file, got: {file_path}"
         )));
     }
 

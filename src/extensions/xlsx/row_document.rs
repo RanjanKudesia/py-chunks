@@ -32,9 +32,11 @@ pub fn chunk_xlsx_row(
     sheet_names: Vec<String>,
     skip_empty_rows: bool,
 ) -> PyResult<PyObject> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
-        return Err(PyValueError::new_err(format!("Expected .xlsx or .xls file path, got: {file_path}")));
+    if !super::common::is_supported_spreadsheet(file_path) {
+        return Err(PyValueError::new_err(format!(
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
+        )));
     }
     if rows_per_chunk == 0 {
         return Err(PyValueError::new_err("rows_per_chunk must be > 0"));

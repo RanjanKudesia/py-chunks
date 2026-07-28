@@ -14,6 +14,166 @@ pub const CT_SLIDING_WINDOW: &str = "row_window";
 pub const CT_PAGE_AWARE: &str = "sheet_region";
 pub const CT_SEMANTIC: &str = "semantic_group";
 
+/// Every spreadsheet extension routed through the calamine-backed xlsx chunkers.
+/// Adding a new calamine-readable format is a one-line change here.
+pub const SPREADSHEET_EXTS: &[&str] = &[
+    ".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".xltx", ".xltm",
+];
+
+thread_local! {
+    /// Set while we are deliberately catching a calamine panic, so the custom
+    /// panic hook stays quiet for it without silencing panics elsewhere.
+    static SUPPRESS_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Install (once) a panic hook that suppresses stderr output only for panics
+/// raised on a thread while [`SUPPRESS_PANIC`] is set — i.e. the calamine panics
+/// we already catch and convert to clean errors. Panics anywhere else print as
+/// normal, preserving debuggability for the rest of the crate.
+fn install_quiet_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let suppress = SUPPRESS_PANIC.with(|c| c.get());
+            if !suppress {
+                default_hook(info);
+            }
+        }));
+    });
+}
+
+/// Run `f` under `catch_unwind` with calamine's panic output suppressed.
+fn catch_calamine_panic<T>(f: impl FnOnce() -> T) -> Result<T, ()> {
+    install_quiet_panic_hook();
+    SUPPRESS_PANIC.with(|c| c.set(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    SUPPRESS_PANIC.with(|c| c.set(false));
+    result.map_err(|_| ())
+}
+
+/// True if `path` ends in any supported spreadsheet extension (case-insensitive).
+pub fn is_supported_spreadsheet(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    SPREADSHEET_EXTS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Human-readable list for error messages, e.g. ".xlsx, .xls, .xlsm, …".
+pub fn supported_spreadsheet_exts_display() -> String {
+    SPREADSHEET_EXTS.join(", ")
+}
+
+/// Open a spreadsheet with calamine.
+///
+/// `.xltx`/`.xltm` are OOXML templates that calamine's `open_workbook_auto` does
+/// not recognise by extension (it would fall back to a probe that tries the Xls
+/// reader first). They are byte-compatible with the Xlsx reader, so we route them
+/// there explicitly — avoiding the wasted probe and making intent clear. Every
+/// other extension goes through `open_workbook_auto`, which dispatches by extension
+/// (xls/xlsx/xlsm/xlsb/ods) exactly as before.
+/// The ODF spec makes the package `mimetype` entry OPTIONAL, but calamine's ODS
+/// reader hard-rejects archives that lack it (`Ods error: 'mimetype' file not
+/// found`). Some real, valid `.ods` files omit it (LibreOffice opens them fine).
+/// When we detect a mimetype-less `.ods`, we repair a copy in memory — prepending
+/// a stored `mimetype` entry as the spec recommends — write it to a temp `.ods`,
+/// and let calamine open that instead. Returns `Some(temp_path)` when repaired.
+///
+/// On unix the temp file is unlinked immediately after calamine opens it; the
+/// open file handle inside the returned workbook keeps the inode alive.
+fn repair_ods_missing_mimetype(file_path: &str) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    let bytes = std::fs::read(file_path).ok()?;
+    let mut archive = ZipArchive::new(std::io::Cursor::new(&bytes)).ok()?;
+    if archive.by_name("mimetype").is_ok() {
+        return None; // Has mimetype — nothing to repair.
+    }
+
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut out);
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("mimetype", stored).ok()?;
+        writer
+            .write_all(b"application/vnd.oasis.opendocument.spreadsheet")
+            .ok()?;
+        for i in 0..archive.len() {
+            let file = archive.by_index_raw(i).ok()?;
+            writer.raw_copy_file(file).ok()?;
+        }
+        writer.finish().ok()?;
+    }
+    let repaired = out.into_inner();
+
+    let mut path = std::env::temp_dir();
+    let uniq = format!(
+        "pychunks_ods_repair_{}_{}.ods",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    path.push(uniq);
+    std::fs::write(&path, &repaired).ok()?;
+    Some(path)
+}
+
+pub fn open_spreadsheet(
+    file_path: &str,
+) -> Result<calamine::Sheets<std::io::BufReader<File>>, String> {
+    // calamine 0.26 can panic (not just Err) on some malformed/edge workbooks —
+    // e.g. certain .xlsb files trigger an internal `no entry found for key` panic.
+    // A panic unwinding across the FFI boundary becomes a Python BaseException
+    // (uncatchable by `except Exception`) and is fragile under `panic=abort`.
+    // Catch it here and surface a clean, catchable error instead.
+    let path = file_path.to_string();
+    let result = catch_calamine_panic(|| {
+        let lower = path.to_ascii_lowercase();
+        if lower.ends_with(".xltx") || lower.ends_with(".xltm") {
+            let reader: calamine::Xlsx<_> = calamine::open_workbook(&path)
+                .map_err(|e| format!("Failed to open workbook: {e}"))?;
+            Ok(calamine::Sheets::Xlsx(reader))
+        } else if lower.ends_with(".ods") {
+            if let Some(tmp) = repair_ods_missing_mimetype(&path) {
+                let wb = open_workbook_auto(&tmp)
+                    .map_err(|e| format!("Failed to open workbook: {e}"));
+                // The workbook now holds an open handle to the temp file; on unix
+                // removing the path here keeps the inode alive for its lifetime.
+                let _ = std::fs::remove_file(&tmp);
+                wb
+            } else {
+                open_workbook_auto(&path).map_err(|e| format!("Failed to open workbook: {e}"))
+            }
+        } else {
+            open_workbook_auto(&path).map_err(|e| format!("Failed to open workbook: {e}"))
+        }
+    });
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(
+            "Failed to open workbook: malformed or unsupported spreadsheet (parser panic)"
+                .to_string(),
+        ),
+    }
+}
+
+/// Read a single worksheet range, converting both errors and calamine panics
+/// into a clean `Err(String)`. See [`open_spreadsheet`] for why panics happen.
+pub fn read_worksheet_range(
+    workbook: &mut calamine::Sheets<std::io::BufReader<File>>,
+    sheet_name: &str,
+) -> Result<calamine::Range<Data>, String> {
+    match catch_calamine_panic(|| workbook.worksheet_range(sheet_name)) {
+        Ok(Ok(range)) => Ok(range),
+        Ok(Err(e)) => Err(format!("Failed to read sheet '{sheet_name}': {e}")),
+        Err(_) => Err(format!(
+            "Failed to read sheet '{sheet_name}': malformed or unsupported spreadsheet data (parser panic)"
+        )),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct XlsxChunkRecord {
     pub content: String,
@@ -70,7 +230,18 @@ pub fn cell_to_string(cell: &Data) -> String {
                 "false".to_string()
             }
         }
-        Data::Empty => String::new(),
+        // Typed date/time cells (common in .ods and .xlsb, also present in .xlsx).
+        // Without this they serialised to an empty string, silently dropping whole
+        // date columns. `as_datetime()` (calamine `dates` feature) yields a chrono
+        // NaiveDateTime whose Display is "YYYY-MM-DD HH:MM:SS".
+        Data::DateTime(dt) => dt
+            .as_datetime()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| dt.as_f64().to_string()),
+        Data::DateTimeIso(s) => s.clone(),
+        Data::DurationIso(s) => s.clone(),
+        Data::Error(_) => String::new(),
+        // Data::Empty and any future calamine variant → empty cell.
         _ => String::new(),
     }
 }
@@ -242,6 +413,7 @@ fn parse_table_name(table_xml: &[u8]) -> Result<Option<String>, String> {
 pub fn get_named_table_names_for_sheet(
     file_path: &str,
     sheet_index_1based: usize,
+    sheet_name: &str,
 ) -> Result<Vec<String>, String> {
     let zip_file = File::open(file_path).map_err(|e| format!("Failed to open file: {e}"))?;
     let mut archive = match ZipArchive::new(zip_file) {
@@ -249,9 +421,26 @@ pub fn get_named_table_names_for_sheet(
         Err(_) => return Ok(Vec::new()), // Not a ZIP archive (e.g. XLS) — no named tables
     };
 
-    let rels_path = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_index_1based);
-    let Some(rels_xml) = read_zip_entry(&mut archive, &rels_path)? else {
+    // ODF (.ods) stores named ranges as `table:named-range` in content.xml,
+    // attributed to a sheet by the `table:cell-range-address` prefix
+    // ("Sheet1.$A$1"). This is the ODS analogue of OOXML named tables.
+    if file_path.to_ascii_lowercase().ends_with(".ods") {
+        if let Some(content) = read_zip_entry(&mut archive, "content.xml")? {
+            return Ok(parse_ods_named_ranges_for_sheet(&content, sheet_name));
+        }
         return Ok(Vec::new());
+    }
+
+    // .xlsx/.xlsm/.xltx/.xltm → sheetN.xml.rels; .xlsb → sheetN.bin.rels.
+    // The referenced table parts (xl/tables/tableN.xml) are XML in both.
+    let xml_rels = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_index_1based);
+    let bin_rels = format!("xl/worksheets/_rels/sheet{}.bin.rels", sheet_index_1based);
+    let rels_xml = match read_zip_entry(&mut archive, &xml_rels)? {
+        Some(b) => b,
+        None => match read_zip_entry(&mut archive, &bin_rels)? {
+            Some(b) => b,
+            None => return Ok(Vec::new()),
+        },
     };
 
     let targets = parse_table_relationship_targets(&rels_xml)?;
@@ -267,6 +456,51 @@ pub fn get_named_table_names_for_sheet(
     }
 
     Ok(names)
+}
+
+/// Parse `table:named-range` elements from an ODS `content.xml`, returning the
+/// names of those attributed to `sheet_name` (via the `table:cell-range-address`
+/// or `table:base-cell-address` prefix, e.g. `"Sheet1.$A$1"`).
+fn parse_ods_named_ranges_for_sheet(content: &[u8], sheet_name: &str) -> Vec<String> {
+    let mut reader = XmlReader::from_reader(content);
+    let mut buf = Vec::new();
+    let mut names = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                if local_name(e.name()).as_slice() == b"named-range" {
+                    let mut name: Option<String> = None;
+                    let mut range_sheet: Option<String> = None;
+                    for attr in e.attributes().flatten() {
+                        let key = local_name(QName(attr.key.as_ref()));
+                        let value = attr_value(&attr);
+                        match key.as_slice() {
+                            b"name" => name = Some(value),
+                            b"cell-range-address" | b"base-cell-address"
+                                if range_sheet.is_none() =>
+                            {
+                                // "Sheet1.$A$1" → sheet is the part before the first '.'
+                                let raw = value.split('.').next().unwrap_or("");
+                                range_sheet =
+                                    Some(raw.trim_start_matches('$').trim_matches('\'').to_string());
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let (Some(name), Some(rs)) = (name, range_sheet) {
+                        if rs == sheet_name {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    names
 }
 
 #[derive(Debug, Clone)]
@@ -413,8 +647,7 @@ pub fn build_row_chunks(
     sheet_names: Vec<String>,
     skip_empty_rows: bool,
 ) -> Result<Vec<XlsxChunkRecord>, String> {
-    let mut workbook =
-        open_workbook_auto(file_path).map_err(|e| format!("Failed to open workbook: {e}"))?;
+    let mut workbook = open_spreadsheet(file_path)?;
 
     let workbook_sheet_names = workbook.sheet_names().to_vec();
     let selected_sheets = if sheet_names.is_empty() {
@@ -435,9 +668,7 @@ pub fn build_row_chunks(
             .position(|name| name == &sheet_name)
             .unwrap_or(0);
 
-        let range = workbook
-            .worksheet_range(&sheet_name)
-            .map_err(|e| format!("Failed to read sheet '{sheet_name}': {e}"))?;
+        let range = read_worksheet_range(&mut workbook, &sheet_name)?;
         let base_row_index = range.start().map(|(row, _)| row as usize).unwrap_or(0);
 
         let rows: Vec<&[Data]> = range.rows().collect();
@@ -446,10 +677,22 @@ pub fn build_row_chunks(
         }
 
         let header_row_index = detect_header_row(&rows);
-        let start_row_index = header_row_index.map_or(0, |idx| idx + 1);
+        let mut start_row_index = header_row_index.map_or(0, |idx| idx + 1);
         let col_count = rows.iter().map(|row| row.len()).max().unwrap_or(0);
         if col_count == 0 {
             continue;
+        }
+        // F2 guard: if every row was consumed as the header (no data rows follow,
+        // e.g. a single merged title cell), fall back to emitting the header row
+        // as content rather than silently dropping the whole sheet.
+        let has_data_rows = rows
+            .iter()
+            .skip(start_row_index)
+            .any(|row| !(skip_empty_rows && row_is_empty(row)));
+        if !has_data_rows {
+            if let Some(hidx) = header_row_index {
+                start_row_index = hidx;
+            }
         }
         let headers = build_headers(&rows, header_row_index, col_count);
 

@@ -30,18 +30,16 @@ use super::super::shared::{
 };
 use super::common::{
     classify_prose, current_section_heading, current_section_level, extract_heading_text,
-    has_keyword_overlap, heading_level, heading_path_strings, is_list_item_line,
-    parse_markdown_blocks, split_at_sentences, split_sentences, strip_block_content,
+    has_keyword_overlap, heading_level, heading_path_strings,
+    parse_markdown_blocks, split_at_sentences, strip_block_content,
     tokenize_keywords, update_heading_stack, ChunkRecordInput, ContentType, MdBlock, MdBlockType,
     MAX_CHUNK_CHARS, MIN_CHUNK_CHARS,
 };
 
 use super::page_aware::build_page_aware_chunks;
 use super::section::build_section_chunks;
-use super::semantic::build_semantic_chunks;
 use super::sentence::build_sentence_chunks;
 use super::sliding_window::build_sliding_window_chunks;
-use super::structural::build_chunks_from_md_bytes;
 
 // ── Pending-chunk queue ───────────────────────────────────────────────────────
 
@@ -351,11 +349,11 @@ impl SemAccum {
         let primary = if self.parts.len() <= 1 {
             "initial"
         } else {
-            reason_counts
-                .iter()
-                .max_by_key(|(_, v)| *v)
-                .map(|(k, _)| *k)
-                .unwrap_or("keyword_overlap")
+            // Sort by (count desc, key asc) for determinism when counts are tied.
+            let mut reason_vec: Vec<(&'static str, usize)> =
+                reason_counts.iter().map(|(k, v)| (*k, *v)).collect();
+            reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            reason_vec.first().map(|(k, _)| *k).unwrap_or("keyword_overlap")
         };
         let tw = content.split_whitespace().count().max(1);
         let kd = (self.keywords.len() as f64 / tw as f64 * 1000.0).round() / 1000.0;

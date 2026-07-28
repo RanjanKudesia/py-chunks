@@ -230,9 +230,10 @@ fn build_from_divider_heuristic(
 
 #[pyfunction]
 pub fn chunk_pptx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes = fs::read(file_path)
@@ -262,9 +263,10 @@ pub fn chunk_pptx_section_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes = fs::read(file_path)

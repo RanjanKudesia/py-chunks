@@ -1,4 +1,13 @@
-use calamine::{open_workbook_auto, Reader};
+//! Spreadsheet image extraction. Images are read from the OOXML `xl/media/`
+//! parts, so this covers `.xlsx`/`.xlsm`/`.xlsb`/`.xltx`/`.xltm`/`.ods`.
+//!
+//! Known limitation: legacy binary `.xls` (BIFF8) is NOT covered — its images
+//! live in the OLE `Workbook` stream as MSODRAWING/Escher blip records, which
+//! would need a dedicated BIFF8 Escher decoder. Deferred as genuinely additive:
+//! images in `.xls` are rare and no real `.xls`-with-image fixture exists in our
+//! corpus to ground/test an implementation. Text extraction for `.xls` is full.
+
+use calamine::Reader;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyModule};
@@ -7,7 +16,7 @@ use pythonize::pythonize;
 use serde_json::json;
 
 use super::common::{build_row_chunks, XlsxChunkRecord};
-use super::images::collect_all_sheet_images;
+use super::images::collect_spreadsheet_images;
 use super::page_aware::build_page_aware_chunks;
 use super::row_document::map_build_error;
 use super::semantic::build_semantic_chunks;
@@ -29,10 +38,10 @@ pub fn chunk_xlsx_with_images(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
 
@@ -51,9 +60,8 @@ pub fn chunk_xlsx_with_images(
         }
     }
 
-    let workbook = open_workbook_auto(file_path).map_err(|e| {
-        pyo3::exceptions::PyIOError::new_err(format!("Failed to open workbook: {e}"))
-    })?;
+    let workbook = super::common::open_spreadsheet(file_path)
+        .map_err(pyo3::exceptions::PyIOError::new_err)?;
     let all_sheet_names = workbook.sheet_names().to_vec();
 
     let normalized_mode = if mode == "default" { "row" } else { mode };
@@ -107,7 +115,7 @@ pub fn chunk_xlsx_with_images(
     .map_err(map_build_error)?;
 
     let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
-    let image_infos = collect_all_sheet_images(file_path, &all_sheet_names, &mut image_out);
+    let image_infos = collect_spreadsheet_images(file_path, &all_sheet_names, &mut image_out);
 
     let mut chunk_list: Vec<PyObject> = image_infos
         .into_iter()

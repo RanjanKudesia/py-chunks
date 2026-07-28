@@ -81,8 +81,15 @@ fn parse_sheet_drawing_targets(
     archive: &mut ZipArchive<File>,
     sheet_index_1based: usize,
 ) -> Vec<String> {
-    let rels_path = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_index_1based);
-    let bytes = match read_zip_entry(archive, &rels_path) {
+    // .xlsx/.xlsm/.xltx/.xltm store the worksheet as sheetN.xml (rels
+    // sheetN.xml.rels); .xlsb stores it as sheetN.bin (rels sheetN.bin.rels).
+    // The drawing/media parts are identical XML/binary in both, so trying the
+    // .bin.rels fallback lights up xlsb images through this same walker.
+    let xml_rels = format!("xl/worksheets/_rels/sheet{}.xml.rels", sheet_index_1based);
+    let bin_rels = format!("xl/worksheets/_rels/sheet{}.bin.rels", sheet_index_1based);
+    let bytes = match read_zip_entry(archive, &xml_rels)
+        .or_else(|| read_zip_entry(archive, &bin_rels))
+    {
         Some(b) => b,
         None => return Vec::new(),
     };
@@ -376,4 +383,191 @@ pub fn collect_all_sheet_images(
     }
 
     result
+}
+
+/// Is a `draw:name` an auto-generated placeholder ("Image 1", "Object 2", …)
+/// rather than a meaningful caption? Mirrors the OOXML walker's filter.
+fn is_generic_draw_name(name: &str) -> bool {
+    let lower = name.trim().to_ascii_lowercase();
+    ["image ", "picture ", "graphic ", "object ", "shape "]
+        .iter()
+        .any(|p| lower.starts_with(p))
+}
+
+/// Extract images from an OpenDocument Spreadsheet (.ods).
+///
+/// ODS has no OOXML `xl/…` layout: images live in a top-level `Pictures/` folder
+/// and are referenced from `content.xml` as
+/// `table:table[@table:name] → … → draw:frame[@draw:name] → draw:image[@xlink:href]`.
+/// We stream `content.xml`, tracking the current sheet and frame, to reproduce the
+/// same per-sheet + alt-text `SheetImageInfo` the OOXML walker yields.
+pub fn collect_all_ods_images(
+    file_path: &str,
+    workbook_sheet_names: &[String],
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<SheetImageInfo> {
+    let zip_file = match File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let mut archive = match ZipArchive::new(zip_file) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+
+    let content = match read_zip_entry(&mut archive, "content.xml") {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+
+    // First pass: parse content.xml into (sheet_name, sheet_index, href, alt).
+    struct OdsImageRef {
+        sheet_name: String,
+        sheet_index: usize,
+        href: String,
+        alt: Option<String>,
+    }
+
+    let mut refs: Vec<OdsImageRef> = Vec::new();
+    let mut reader = XmlReader::from_reader(content.as_slice());
+    let mut buf = Vec::new();
+
+    let mut sheet_counter: usize = 0;
+    let mut current_sheet_name = String::new();
+    let mut current_sheet_index = 0usize;
+    let mut frame_alt: Option<String> = None;
+    let mut in_frame = false;
+    // Track svg:title / svg:desc text nodes inside a frame (richer than draw:name).
+    let mut capture_text_into: Option<&'static str> = None;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                let name = local_name(e.name());
+                match name.as_slice() {
+                    b"table" => {
+                        // table:table — a sheet. Capture its name / index.
+                        let mut tname = String::new();
+                        for attr in e.attributes().flatten() {
+                            if local_name(QName(attr.key.as_ref())).as_slice() == b"name" {
+                                tname = attr_value(&attr);
+                            }
+                        }
+                        current_sheet_index = workbook_sheet_names
+                            .iter()
+                            .position(|n| n == &tname)
+                            .unwrap_or(sheet_counter);
+                        current_sheet_name = if tname.is_empty() {
+                            workbook_sheet_names
+                                .get(sheet_counter)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            tname
+                        };
+                        sheet_counter += 1;
+                    }
+                    b"frame" => {
+                        in_frame = true;
+                        frame_alt = None;
+                        for attr in e.attributes().flatten() {
+                            if local_name(QName(attr.key.as_ref())).as_slice() == b"name" {
+                                let v = attr_value(&attr);
+                                if !v.trim().is_empty() && !is_generic_draw_name(&v) {
+                                    frame_alt = Some(v);
+                                }
+                            }
+                        }
+                    }
+                    b"title" | b"desc" if in_frame => {
+                        capture_text_into = Some(if name.as_slice() == b"title" {
+                            "title"
+                        } else {
+                            "desc"
+                        });
+                    }
+                    b"image" if in_frame => {
+                        // draw:image xlink:href="Pictures/xxx"
+                        let mut href = String::new();
+                        for attr in e.attributes().flatten() {
+                            if local_name(QName(attr.key.as_ref())).as_slice() == b"href" {
+                                href = attr_value(&attr);
+                            }
+                        }
+                        if !href.is_empty() {
+                            refs.push(OdsImageRef {
+                                sheet_name: current_sheet_name.clone(),
+                                sheet_index: current_sheet_index,
+                                href,
+                                alt: frame_alt.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Text(ref t)) => {
+                if capture_text_into.is_some() && in_frame {
+                    let text = String::from_utf8_lossy(t.as_ref()).trim().to_string();
+                    if !text.is_empty() {
+                        // svg:desc/title is a real caption — prefer it over draw:name.
+                        frame_alt = Some(text);
+                    }
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = local_name(e.name());
+                match name.as_slice() {
+                    b"frame" => {
+                        in_frame = false;
+                        frame_alt = None;
+                    }
+                    b"title" | b"desc" => capture_text_into = None,
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    // Second pass: resolve each unique href from the Pictures/ folder, hash it,
+    // and build the per-image SheetImageInfo list.
+    let mut result = Vec::new();
+    for r in refs {
+        let img_bytes = match read_zip_entry(&mut archive, &r.href) {
+            Some(b) => b,
+            None => continue,
+        };
+        let hash_name = match image_hash_name(&img_bytes, &r.href) {
+            Some(n) => n,
+            None => continue,
+        };
+        if !image_out.iter().any(|(n, _)| n == &hash_name) {
+            image_out.push((hash_name.clone(), img_bytes));
+        }
+        result.push(SheetImageInfo {
+            sheet_name: r.sheet_name,
+            sheet_index: r.sheet_index,
+            hash_name,
+            alt_text: r.alt,
+        });
+    }
+
+    result
+}
+
+/// Format-aware image collection: ODS uses the ODF walker, every other
+/// spreadsheet family uses the OOXML walker (which also handles .xlsb).
+pub fn collect_spreadsheet_images(
+    file_path: &str,
+    workbook_sheet_names: &[String],
+    image_out: &mut Vec<(String, Vec<u8>)>,
+) -> Vec<SheetImageInfo> {
+    if file_path.to_ascii_lowercase().ends_with(".ods") {
+        collect_all_ods_images(file_path, workbook_sheet_names, image_out)
+    } else {
+        collect_all_sheet_images(file_path, workbook_sheet_names, image_out)
+    }
 }

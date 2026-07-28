@@ -1,8 +1,15 @@
 pub mod csv;
 pub mod doc;
 pub mod docx;
+pub mod eml;
+pub mod json;
+pub mod odf;
 pub mod html;
 pub mod md;
+pub mod msg;
+pub mod epub;
+pub mod ipynb;
+pub mod rtf;
 pub mod odraw;
 pub mod pdf;
 pub mod ppt;

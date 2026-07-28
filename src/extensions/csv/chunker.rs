@@ -198,9 +198,10 @@ pub fn chunk_csv(
     encoding: &str,
     skip_empty_rows: bool,
 ) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".csv") {
+    let lower_ext = file_path.to_ascii_lowercase();
+    if !lower_ext.ends_with(".csv") && !lower_ext.ends_with(".tsv") {
         return Err(PyValueError::new_err(format!(
-            "Expected .csv file path, got: {file_path}"
+            "Expected .csv or .tsv file path, got: {file_path}"
         )));
     }
 

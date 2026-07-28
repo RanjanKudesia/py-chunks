@@ -49,9 +49,10 @@ struct ChunkRecordInput {
 
 #[pyfunction]
 fn chunk_docx_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 
@@ -134,9 +135,10 @@ fn chunk_docx_section_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 
@@ -416,7 +418,12 @@ fn split_text_by_max_chars(text: &str, max_chars: usize) -> Vec<String> {
 
             let mut start = 0usize;
             while start < line.len() {
-                let end = (start + max_chars).min(line.len());
+                let mut end = (start + max_chars).min(line.len());
+                end = crate::extensions::shared::floor_char_boundary(line, end);
+                if end <= start {
+                    // max_chars smaller than a single char; advance one whole char.
+                    end = crate::extensions::shared::floor_char_boundary(line, start + 4).max(start + 1).min(line.len());
+                }
                 out.push(line[start..end].trim().to_string());
                 start = end;
             }
@@ -478,9 +485,10 @@ impl DocxSectionIterator {
 
 #[pyfunction]
 fn chunk_docx_section_stream(file_path: &str) -> PyResult<DocxSectionIterator> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 

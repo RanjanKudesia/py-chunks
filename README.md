@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, PPT, TXT, Markdown, HTML, CSV, XLSX, and XLS files — optimised for production use.
+Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, PPT, TXT, Markdown, HTML, CSV, TSV, XLSX, XLS, XLSM, XLSB, ODS, XLTX, and XLTM files — optimised for production use.
 
 ## Contents
 
@@ -35,10 +35,10 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
 
 ## Features
 
-- **11 Document Formats**: PDF, DOCX, DOC (Word 97–2003), PPTX, PPT (PowerPoint 97–2003), Markdown, HTML, TXT, CSV, XLSX, XLS
-- **7 Chunking Modes for document formats**: `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
-- **6 Chunking Modes for spreadsheet formats** (XLSX / XLS): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
-- **4 Chunking Modes for CSV**: `row`, `default`, `sliding_window`, `page_aware`
+- **36 Document Formats**: PDF, DOCX, DOCM, DOTX, DOTM, DOC (Word 97–2003), PPTX, POTX, POTM, PPSX, PPSM, PPT (PowerPoint 97–2003), ODT/ODP (OpenDocument), Markdown, HTML, TXT, CSV, TSV, XLSX, XLS, XLSM, XLSB, ODS, XLTX, XLTM, JSON/JSONL/NDJSON, MSG (Outlook), EML/MBOX (MIME email), RTF, EPUB, IPYNB (Jupyter)
+- **7 Chunking Modes for document formats** (incl. all Word `.docm`/`.dotx`/`.dotm` and PowerPoint `.potx`/`.potm`/`.ppsx`/`.ppsm` OOXML variants): `default`, `structural`, `section`, `semantic`, `sliding_window`, `sentence`, `page_aware`
+- **6 Chunking Modes for spreadsheet formats** (XLSX / XLS / XLSM / XLSB / ODS / XLTX / XLTM): `row`, `table`, `sheet`, `sliding_window`, `page_aware`, `semantic`
+- **4 Chunking Modes for delimited text** (CSV / TSV): `row`, `default`, `sliding_window`, `page_aware`
 - **Streaming for every format** via a single `stream_chunks()` entry point
   - PDF: background Rust thread + `mpsc` channel (all 7 modes, true one-chunk-at-a-time)
   - Markdown / HTML / TXT: block-by-block state machine for `structural` + `semantic`; batch-drain for the rest
@@ -48,9 +48,9 @@ Fast, framework-agnostic document chunking library backed by Rust. Extract meani
   - PPTX: batch-drain (ZIP must be read upfront, then chunks are yielded one at a time)
   - XLSX / XLS: `row` and `sliding_window` use true state machines (one chunk per `__next__`, O(parsed_rows) memory); `table`, `sheet`, `page_aware`, and `semantic` use batch-drain (global sheet analysis required before first chunk)
   - CSV: true line-by-line worker for `row` / `default`, `sliding_window`, and `page_aware`; delimiter auto-detection and encoding-aware decoding are supported
-- **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (12 extensions: `.doc`, `.docx`, `.pptx`, `.ppt`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.csv`, `.txt`, `.md`)
-- **Image extraction** for DOCX, PPTX, XLSX, HTML, PDF, DOC, and PPT in two modes:
-  - `get_chunks(..., list_images=True)` — returns a `ChunksResult` with the normal chunk list plus a `dict[str, bytes]` of every embedded image; each image also appears as a dedicated `content_type="image"` chunk whose `content` is the image's hash filename. All 7 chunking modes supported for document formats; all 6 for XLSX.
+- **Markdown conversion** via `get_markdown()` — converts any supported document to a Markdown string (26 extensions: `.doc`, `.docx`, `.docm`, `.dotx`, `.dotm`, `.pptx`, `.potx`, `.potm`, `.ppsx`, `.ppsm`, `.ppt`, `.pdf`, `.html`, `.htm`, `.xlsx`, `.xls`, `.xlsm`, `.xlsb`, `.ods`, `.xltx`, `.xltm`, `.csv`, `.tsv`, `.txt`, `.md`)
+- **Image extraction** for DOCX/DOCM/DOTX/DOTM, PPTX/POTX/POTM/PPSX/PPSM, XLSX/XLSM/XLSB/ODS/XLTX/XLTM, HTML, PDF, DOC, and PPT in two modes:
+  - `get_chunks(..., list_images=True)` — returns a `ChunksResult` with the normal chunk list plus a `dict[str, bytes]` of every embedded image; each image also appears as a dedicated `content_type="image"` chunk whose `content` is the image's hash filename. All 7 chunking modes supported for document formats; all 6 for spreadsheet formats. Spreadsheet images carry per-sheet `sheet_name`/`sheet_index` and `alt_text` metadata; `.xlsb` resolves them via a `sheetN.bin.rels` fallback and `.ods` via a dedicated ODF `Pictures/` walker. `.xls` has no extractable images.
   - `get_markdown(..., list_images=True)` — returns a `MarkdownResult` with the rendered Markdown plus the same image dict. Images keyed by a stable content hash; web-renderable formats only: `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`.
   - **PDF images are page-scoped**: each extracted raster is re-encoded to `.png` and tagged with the `page_number` it appears on (rather than `alt_text`), and image chunks are grouped ahead of the text chunks. Scanned / image-only PDFs (no text layer) still return their page images instead of raising.
   - **Legacy binary formats (`.doc`, `.ppt`)**: JPEG and PNG images are decoded from the OfficeArt (MS-ODRAW) BLIP records embedded in the binary streams. `.ppt` images carry the `page_number` (slide) they appear on when it can be determined safely; `.doc` inline pictures carry a `paragraph_index` anchor. Vector/legacy raster payloads (EMF, WMF, PICT, DIB, TIFF) are silently skipped.

@@ -21,7 +21,7 @@ use serde_json::json;
 use std::fs;
 
 use super::common::{
-    classify_block, classify_prose, current_section_heading, current_section_level,
+    classify_prose, current_section_heading, current_section_level,
     extract_heading_text, has_keyword_overlap, heading_level_txt, heading_path_strings,
     parse_txt_blocks, split_at_sentences, tokenize_keywords, txt_metadata, update_heading_stack,
     ChunkRecordInput, ContentType, MAX_CHUNK_CHARS, MIN_CHUNK_CHARS,
@@ -30,10 +30,8 @@ use super::super::shared::ci_starts_with;
 
 use super::page_aware::build_page_aware_chunks;
 use super::section::build_section_chunks;
-use super::semantic::build_semantic_chunks;
 use super::sentence::build_sentence_chunks;
 use super::sliding_window::build_sliding_window_chunks;
-use super::structural::build_chunks_from_txt_bytes;
 
 // ── Shared PyDict helper ──────────────────────────────────────────────────────
 
@@ -226,7 +224,12 @@ impl SemAccum {
             }
         }
         let primary = if self.parts.len() <= 1 { "initial" }
-        else { counts.iter().max_by_key(|(_,v)| *v).map(|(k,_)| *k).unwrap_or("keyword_overlap") };
+        else {
+            // Sort by (count desc, key asc) for determinism when counts are tied.
+            let mut reason_vec: Vec<(&'static str, usize)> = counts.into_iter().collect();
+            reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            reason_vec.first().map(|(k, _)| *k).unwrap_or("keyword_overlap")
+        };
         let tw = content.split_whitespace().count().max(1);
         let kd = (self.keywords.len() as f64 / tw as f64 * 1000.0).round() / 1000.0;
         let avg_bl = if self.parts.is_empty() { 0 } else { self.parts.iter().map(|p| p.content.len()).sum::<usize>() / self.parts.len() };

@@ -25,10 +25,8 @@ use super::super::shared::{
 };
 use super::page_aware::build_page_aware_chunks;
 use super::section::build_section_chunks;
-use super::semantic::build_semantic_chunks;
 use super::sentence::build_sentence_chunks;
 use super::sliding_window::build_sliding_window_chunks;
-use super::structural::build_chunks_from_html_bytes;
 
 fn chunk_to_pydict(py: Python<'_>, c: &ChunkRecordInput) -> PyResult<PyObject> {
     let dict = pyo3::types::PyDict::new_bound(py);
@@ -157,7 +155,12 @@ impl SemAccum {
         let mut merge_reasons: Vec<&'static str> = Vec::new();
         let mut counts: HashMap<&'static str, usize> = HashMap::new();
         for p in &self.parts { if p.reason != "initial" { if !merge_reasons.contains(&p.reason) { merge_reasons.push(p.reason); } *counts.entry(p.reason).or_default() += 1; } }
-        let primary = if self.parts.len() <= 1 { "initial" } else { counts.iter().max_by_key(|(_,v)| *v).map(|(k,_)| *k).unwrap_or("keyword_overlap") };
+        let primary = if self.parts.len() <= 1 { "initial" } else {
+            // Sort by (count desc, key asc) for determinism when counts are tied.
+            let mut reason_vec: Vec<(&'static str, usize)> = counts.into_iter().collect();
+            reason_vec.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+            reason_vec.first().map(|(k, _)| *k).unwrap_or("keyword_overlap")
+        };
         let tw = content.split_whitespace().count().max(1);
         let kd = (self.keywords.len() as f64 / tw as f64 * 1000.0).round() / 1000.0;
         ChunkRecordInput {

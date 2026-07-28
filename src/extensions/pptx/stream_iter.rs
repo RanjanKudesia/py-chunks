@@ -56,8 +56,11 @@ pub fn stream_pptx_chunks(
     sentences_per_chunk: usize,
     slides_per_chunk: usize,
 ) -> PyResult<Py<PptxStreamIterator>> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
-        return Err(PyValueError::new_err(format!("Expected .pptx file path, got: {file_path}")));
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
+        return Err(PyValueError::new_err(format!(
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
+        )));
     }
     match mode {
         "default" | "structural" | "semantic" | "section"

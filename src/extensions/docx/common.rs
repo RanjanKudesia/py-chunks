@@ -16,6 +16,23 @@ use quick_xml::name::QName;
 use quick_xml::Reader;
 use zip::ZipArchive;
 
+/// Every WordprocessingML OOXML extension routed through the docx chunker. They
+/// all store the body in `word/document.xml`, which the parser reads by part name
+/// regardless of extension, so the same code path serves every variant.
+/// Adding a future Word variant is a one-line change here.
+pub const WORD_OOXML_EXTS: &[&str] = &[".docx", ".docm", ".dotx", ".dotm"];
+
+/// True if `path` ends in any supported Word OOXML extension (case-insensitive).
+pub fn is_word_ooxml(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    WORD_OOXML_EXTS.iter().any(|ext| lower.ends_with(ext))
+}
+
+/// Human-readable extension list for error messages.
+pub fn word_exts_display() -> String {
+    WORD_OOXML_EXTS.join(", ")
+}
+
 /// True when `name` matches `expected`, ignoring any XML namespace prefix
 /// (e.g. matches `w:p` against `b"p"` and a bare `p` against `b"p"`).
 pub(super) fn qname_eq(name: QName<'_>, expected: &[u8]) -> bool {

@@ -117,9 +117,10 @@ impl ContentType {
 
 #[pyfunction]
 fn chunk_docx(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 
@@ -1338,9 +1339,9 @@ fn recursive_char_chunks(text: &str, max_chars: usize, overlap: usize) -> Vec<St
         return vec![text.to_string()];
     }
 
-    let split_at = max_chars.min(text.len());
+    let split_at = crate::extensions::shared::floor_char_boundary(text, max_chars.min(text.len()));
     let head = text[..split_at].trim().to_string();
-    let tail_start = split_at.saturating_sub(overlap);
+    let tail_start = crate::extensions::shared::floor_char_boundary(text, split_at.saturating_sub(overlap));
     let tail = text[tail_start..].trim().to_string();
 
     let mut out = vec![head];
@@ -1352,395 +1353,10 @@ fn recursive_char_chunks(text: &str, max_chars: usize, overlap: usize) -> Vec<St
 
 #[pyclass]
 pub struct DocxStructuralIterator {
-    elements: Vec<DocumentElement>,
-    doc_metadata: Value,
-    footnote_map: HashMap<String, String>,
-    endnote_map: HashMap<String, String>,
-    element_index: usize,
-    // Grouping state - these accumulate as we process elements
-    section_heading: Option<String>,
-    section_parts: Vec<DocumentElement>,
-    outside_short_parts: Vec<DocumentElement>,
-    outside_short_first_page: Option<usize>,
-    done: bool,
-}
-
-impl DocxStructuralIterator {
-    fn flush_one_short(&mut self) -> Option<ChunkRecordInput> {
-        if self.outside_short_parts.is_empty() {
-            self.outside_short_first_page = None;
-            return None;
-        }
-        let merged = self
-            .outside_short_parts
-            .iter()
-            .map(|p| p.text.clone())
-            .collect::<Vec<_>>()
-            .join(" ")
-            .trim()
-            .to_string();
-        let mut fns = Vec::new();
-        let mut ens = Vec::new();
-        for p in self.outside_short_parts.iter() {
-            collect_element_refs(p, &self.footnote_map, &self.endnote_map, &mut fns, &mut ens);
-        }
-        self.outside_short_parts.clear();
-        let page = self.outside_short_first_page;
-        if !merged.is_empty() {
-            let items = recursive_char_chunks(
-                &merged,
-                SHORT_AGGREGATE_CHUNK_SIZE,
-                SHORT_AGGREGATE_CHUNK_OVERLAP,
-            );
-            if !items.is_empty() {
-                let first = items[0].clone();
-                for item in items.iter().skip(1) {
-                    // Re-queue remaining sub-chunks as synthetic short
-                    // paragraphs carrying no footnote refs — the original
-                    // refs are attached to the first emitted chunk only.
-                    self.outside_short_parts.push(DocumentElement {
-                        content_type: ContentType::ShortDisconnectedParagraph,
-                        text: item.clone(),
-                        page_number: page,
-                        heading_level: None,
-                        footnote_refs: Vec::new(),
-                        endnote_refs: Vec::new(),
-                        image_rid: None,
-                    });
-                }
-                if self.outside_short_parts.is_empty() {
-                    self.outside_short_first_page = None;
-                }
-                return Some(ChunkRecordInput {
-                    content_type: ContentType::ShortDisconnectedParagraph,
-                    content: first,
-                    metadata: base_chunk_metadata(None, None, &fns, &ens, &self.doc_metadata, page),
-                });
-            }
-        }
-        self.outside_short_first_page = None;
-        None
-    }
-
-    fn flush_one_section(&mut self) -> Option<ChunkRecordInput> {
-        if self.section_parts.is_empty() && self.section_heading.is_none() {
-            return None;
-        }
-
-        let heading = self.section_heading.take();
-        let heading_level = self.section_parts.first().and_then(|p| p.heading_level);
-        let section_page = self.section_parts.first().and_then(|p| p.page_number);
-        let mut has_paragraph = false;
-        let mut has_bullets = false;
-        let mut has_image = false;
-        let mut lines = Vec::new();
-        let mut shorts = Vec::new();
-        let mut fns = Vec::new();
-        let mut ens = Vec::new();
-
-        for part in self.section_parts.iter() {
-            collect_element_refs(
-                part,
-                &self.footnote_map,
-                &self.endnote_map,
-                &mut fns,
-                &mut ens,
-            );
-            match part.content_type {
-                ContentType::BulletNumberedList => {
-                    has_bullets = true;
-                    lines.push(part.text.clone());
-                }
-                ContentType::HeadingSection => {
-                    lines.push(part.text.clone());
-                }
-                ContentType::ShortDisconnectedParagraph => {
-                    has_paragraph = true;
-                    shorts.push(part.text.clone());
-                }
-                ContentType::Image => {
-                    has_image = true;
-                    lines.push(part.text.clone());
-                }
-                _ => {
-                    has_paragraph = true;
-                    lines.push(part.text.clone());
-                }
-            }
-        }
-
-        if !shorts.is_empty() {
-            lines.push(shorts.join(" "));
-        }
-
-        self.section_parts.clear();
-
-        let combined = lines.join("\n").trim().to_string();
-        if !combined.is_empty() {
-            let content_type = if heading.is_some() && (has_paragraph || has_bullets || has_image) {
-                ContentType::MixedContent
-            } else {
-                ContentType::HeadingSection
-            };
-            return Some(ChunkRecordInput {
-                content_type,
-                content: combined,
-                metadata: base_chunk_metadata(
-                    heading,
-                    heading_level,
-                    &fns,
-                    &ens,
-                    &self.doc_metadata,
-                    section_page,
-                ),
-            });
-        }
-
-        None
-    }
-
-    fn next_chunk(&mut self) -> Option<ChunkRecordInput> {
-        if self.done {
-            return None;
-        }
-
-        loop {
-            if self.element_index >= self.elements.len() {
-                // Done with elements, flush any pending state
-                if let Some(chunk) = self.flush_one_short() {
-                    return Some(chunk);
-                }
-                if let Some(chunk) = self.flush_one_section() {
-                    return Some(chunk);
-                }
-                self.done = true;
-                return None;
-            }
-
-            // Clone the element to avoid borrow conflicts
-            let element = self.elements[self.element_index].clone();
-
-            match element.content_type {
-                ContentType::HeaderFooter
-                | ContentType::FootnoteCaption
-                | ContentType::MixedContent => {
-                    self.element_index += 1;
-                }
-                ContentType::HeadingSection => {
-                    // Flush any pending state before starting new section
-                    if let Some(chunk) = self.flush_one_short() {
-                        return Some(chunk);
-                    }
-                    if let Some(chunk) = self.flush_one_section() {
-                        return Some(chunk);
-                    }
-                    // Start new section
-                    self.section_heading = Some(element.text.clone());
-                    self.section_parts.push(element);
-                    self.element_index += 1;
-                }
-                ContentType::BulletNumberedList => {
-                    // Collect all consecutive bullets along with their refs
-                    let mut bullets: Vec<DocumentElement> = vec![element.clone()];
-                    let mut j = self.element_index + 1;
-                    while j < self.elements.len()
-                        && self.elements[j].content_type == ContentType::BulletNumberedList
-                    {
-                        bullets.push(self.elements[j].clone());
-                        j += 1;
-                    }
-                    let list_text = bullets
-                        .iter()
-                        .map(|b| b.text.clone())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if self.section_heading.is_some() {
-                        // Add to current section as a synthetic combined element
-                        let mut merged_footnotes: Vec<String> = Vec::new();
-                        let mut merged_endnotes: Vec<String> = Vec::new();
-                        for b in &bullets {
-                            merged_footnotes.extend(b.footnote_refs.iter().cloned());
-                            merged_endnotes.extend(b.endnote_refs.iter().cloned());
-                        }
-                        self.section_parts.push(DocumentElement {
-                            content_type: ContentType::BulletNumberedList,
-                            text: list_text,
-                            page_number: element.page_number,
-                            heading_level: None,
-                            footnote_refs: merged_footnotes,
-                            endnote_refs: merged_endnotes,
-                            image_rid: None,
-                        });
-                        self.element_index = j;
-                    } else {
-                        // Standalone bullet list
-                        if let Some(chunk) = self.flush_one_short() {
-                            return Some(chunk);
-                        }
-                        let mut fns = Vec::new();
-                        let mut ens = Vec::new();
-                        for b in &bullets {
-                            collect_element_refs(
-                                b,
-                                &self.footnote_map,
-                                &self.endnote_map,
-                                &mut fns,
-                                &mut ens,
-                            );
-                        }
-                        self.element_index = j;
-                        return Some(ChunkRecordInput {
-                            content_type: ContentType::BulletNumberedList,
-                            content: list_text,
-                            metadata: base_chunk_metadata(
-                                None,
-                                None,
-                                &fns,
-                                &ens,
-                                &self.doc_metadata,
-                                element.page_number,
-                            ),
-                        });
-                    }
-                }
-                ContentType::Table => {
-                    if let Some(chunk) = self.flush_one_short() {
-                        return Some(chunk);
-                    }
-                    if let Some(chunk) = self.flush_one_section() {
-                        return Some(chunk);
-                    }
-                    let mut fns = Vec::new();
-                    let mut ens = Vec::new();
-                    collect_element_refs(
-                        &element,
-                        &self.footnote_map,
-                        &self.endnote_map,
-                        &mut fns,
-                        &mut ens,
-                    );
-                    self.element_index += 1;
-                    return Some(ChunkRecordInput {
-                        content_type: ContentType::Table,
-                        content: element.text.clone(),
-                        metadata: base_chunk_metadata(
-                            None,
-                            None,
-                            &fns,
-                            &ens,
-                            &self.doc_metadata,
-                            element.page_number,
-                        ),
-                    });
-                }
-                ContentType::CodeBlock => {
-                    if let Some(chunk) = self.flush_one_short() {
-                        return Some(chunk);
-                    }
-                    if let Some(chunk) = self.flush_one_section() {
-                        return Some(chunk);
-                    }
-                    let mut fns = Vec::new();
-                    let mut ens = Vec::new();
-                    collect_element_refs(
-                        &element,
-                        &self.footnote_map,
-                        &self.endnote_map,
-                        &mut fns,
-                        &mut ens,
-                    );
-                    self.element_index += 1;
-                    return Some(ChunkRecordInput {
-                        content_type: ContentType::CodeBlock,
-                        content: element.text.clone(),
-                        metadata: base_chunk_metadata(
-                            None,
-                            None,
-                            &fns,
-                            &ens,
-                            &self.doc_metadata,
-                            element.page_number,
-                        ),
-                    });
-                }
-                ContentType::ShortDisconnectedParagraph => {
-                    if self.section_heading.is_some() {
-                        self.section_parts.push(element);
-                        self.element_index += 1;
-                    } else {
-                        if self.outside_short_parts.is_empty() {
-                            self.outside_short_first_page = element.page_number;
-                        }
-                        self.outside_short_parts.push(element);
-                        self.element_index += 1;
-                    }
-                }
-                ContentType::PlainParagraph
-                | ContentType::LongSingleParagraph
-                | ContentType::Image => {
-                    if self.section_heading.is_some() {
-                        self.section_parts.push(element);
-                        self.element_index += 1;
-                    } else {
-                        // Handle outside section content
-                        if let Some(chunk) = self.flush_one_short() {
-                            return Some(chunk);
-                        }
-
-                        // Split large paragraphs by semantic chunks
-                        let split = semantic_chunks(&element.text, SEMANTIC_SPLIT_MAX_BYTES);
-                        if !split.is_empty() {
-                            let first = split[0].clone();
-                            let element_page = element.page_number;
-                            if split.len() > 1 {
-                                if self.outside_short_parts.is_empty() {
-                                    self.outside_short_first_page = element_page;
-                                }
-                                for item in split.iter().skip(1) {
-                                    // Sub-chunks after the first carry no
-                                    // ref ids — refs already attached below.
-                                    self.outside_short_parts.push(DocumentElement {
-                                        content_type: ContentType::ShortDisconnectedParagraph,
-                                        text: item.clone(),
-                                        page_number: element_page,
-                                        heading_level: None,
-                                        footnote_refs: Vec::new(),
-                                        endnote_refs: Vec::new(),
-                                        image_rid: None,
-                                    });
-                                }
-                            }
-                            let mut fns = Vec::new();
-                            let mut ens = Vec::new();
-                            collect_element_refs(
-                                &element,
-                                &self.footnote_map,
-                                &self.endnote_map,
-                                &mut fns,
-                                &mut ens,
-                            );
-                            self.element_index += 1;
-                            return Some(ChunkRecordInput {
-                                content_type: element.content_type,
-                                content: first,
-                                metadata: base_chunk_metadata(
-                                    None,
-                                    None,
-                                    &fns,
-                                    &ens,
-                                    &self.doc_metadata,
-                                    element_page,
-                                ),
-                            });
-                        }
-
-                        self.element_index += 1;
-                    }
-                }
-            }
-        }
-    }
+    // The structural chunker parses document.xml in full up front (it is not
+    // memory-incremental), so to guarantee byte-perfect batch/stream parity we
+    // build the complete chunk list via the batch path and yield it lazily.
+    chunks: std::vec::IntoIter<ChunkRecordInput>,
 }
 
 #[pymethods]
@@ -1750,7 +1366,7 @@ impl DocxStructuralIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        if let Some(chunk) = self.next_chunk() {
+        if let Some(chunk) = self.chunks.next() {
             let dict = PyDict::new_bound(py);
             dict.set_item("content", &chunk.content)?;
             dict.set_item("content_type", chunk.content_type.as_str())?;
@@ -1764,9 +1380,10 @@ impl DocxStructuralIterator {
 
 #[pyfunction]
 fn chunk_docx_structural_stream(file_path: &str) -> PyResult<DocxStructuralIterator> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 
@@ -1810,17 +1427,9 @@ fn chunk_docx_structural_stream(file_path: &str) -> PyResult<DocxStructuralItera
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to parse document.xml: {e}")))?;
     let elements = lower_blocks_to_elements(raw_blocks);
 
+    let chunks = build_chunks_from_elements(elements, &doc_metadata, &footnote_map, &endnote_map);
     Ok(DocxStructuralIterator {
-        elements,
-        doc_metadata,
-        footnote_map,
-        endnote_map,
-        element_index: 0,
-        section_heading: None,
-        section_parts: Vec::new(),
-        outside_short_parts: Vec::new(),
-        outside_short_first_page: None,
-        done: false,
+        chunks: chunks.into_iter(),
     })
 }
 
@@ -1829,9 +1438,10 @@ fn chunk_docx_structural_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".docx") {
+    if !crate::extensions::docx::common::is_word_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .docx file path, got: {file_path}"
+            "Expected a Word OOXML file ({}), got: {file_path}",
+            crate::extensions::docx::common::word_exts_display()
         )));
     }
 

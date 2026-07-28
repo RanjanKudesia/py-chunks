@@ -31,6 +31,42 @@ from .chunkers.html import (
     html_to_markdown_with_images as _html_to_markdown_with_images,
 )
 from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
+from .chunkers.tsv import chunk_tsv, tsv_to_markdown as _tsv_to_markdown, stream_chunk_tsv
+from .chunkers.msg import chunk_msg, msg_to_markdown as _msg_to_markdown, stream_chunk_msg
+from .chunkers.eml import (
+    chunk_eml,
+    chunk_eml_with_images as _chunk_eml_with_images,
+    eml_to_markdown as _eml_to_markdown,
+    eml_to_markdown_with_images as _eml_to_markdown_with_images,
+    stream_chunk_eml,
+)
+from .chunkers.odf import (
+    chunk_odf,
+    chunk_odf_with_images as _chunk_odf_with_images,
+    odf_to_markdown as _odf_to_markdown,
+    odf_to_markdown_with_images as _odf_to_markdown_with_images,
+    stream_chunk_odf,
+)
+from .chunkers.json import (
+    chunk_json,
+    json_to_markdown as _json_to_markdown,
+    stream_chunk_json,
+)
+from .chunkers.rtf import chunk_rtf, rtf_to_markdown as _rtf_to_markdown, stream_chunk_rtf
+from .chunkers.epub import (
+    chunk_epub,
+    chunk_epub_with_images as _chunk_epub_with_images,
+    epub_to_markdown as _epub_to_markdown,
+    epub_to_markdown_with_images as _epub_to_markdown_with_images,
+    stream_chunk_epub,
+)
+from .chunkers.ipynb import (
+    chunk_ipynb,
+    chunk_ipynb_with_images as _chunk_ipynb_with_images,
+    ipynb_to_markdown as _ipynb_to_markdown,
+    ipynb_to_markdown_with_images as _ipynb_to_markdown_with_images,
+    stream_chunk_ipynb,
+)
 from .chunkers.doc import chunk_doc, chunk_doc_with_images as _chunk_doc_with_images, doc_to_markdown as _doc_to_markdown, doc_to_markdown_with_images as _doc_to_markdown_with_images, stream_chunk_doc
 from .chunkers.docx import chunk_docx, chunk_docx_with_images as _chunk_docx_with_images, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
 import os
@@ -45,28 +81,10 @@ from urllib.request import urlopen
 
 _pkg_dir = Path(__file__).parent
 
-# Tell the Rust layer where to find the bundled PDFium binary.
 os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(_pkg_dir))
 
-# Directly resolve the bundled binary and set PDFIUM_LIBRARY_PATH to its
-# absolute path.  This hits the highest-priority branch in the Rust resolver
-# so no directory scanning is needed — the path is always exact.
-_PDFIUM_NAMES = {
-    "win32":  "pdfium.dll",
-    "darwin": "libpdfium.dylib",
-    "linux":  "libpdfium.so",
-}
-_pdfium_bin = _pkg_dir / _PDFIUM_NAMES.get(sys.platform, "")
-if _pdfium_bin.exists():
-    os.environ.setdefault("PDFIUM_LIBRARY_PATH", str(_pdfium_bin))
-
-# On Windows, register the package directory as a DLL search directory so
-# pdfium.dll's own dependencies (vcruntime140.dll, msvcp140.dll …) are found
-# in py_chunks/ rather than failing with LoadLibrary error 126.
-# os.add_dll_directory() wraps AddDllDirectory() — available on Python 3.8+,
-# which we always satisfy (requires-python = ">=3.9").
-if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
-    os.add_dll_directory(str(_pkg_dir))
+# PDF parsing is handled by the `liteparse` crate, which vendors its own PDFium
+# binding — no external PDFium binary resolution is required here anymore.
 
 
 @dataclass
@@ -88,53 +106,137 @@ class ChunksResult:
 _DISPATCH = {
     ".doc": chunk_doc,
     ".docx": chunk_docx,
+    ".docm": chunk_docx,
+    ".dotx": chunk_docx,
+    ".dotm": chunk_docx,
     ".csv": chunk_csv,
+    ".tsv": chunk_tsv,
+    ".msg": chunk_msg,
+    ".eml": chunk_eml,
+    ".mbox": chunk_eml,
+    ".odt": chunk_odf,
+    ".odp": chunk_odf,
+    ".json": chunk_json,
+    ".jsonl": chunk_json,
+    ".ndjson": chunk_json,
+    ".rtf": chunk_rtf,
+    ".epub": chunk_epub,
+    ".ipynb": chunk_ipynb,
     ".html": chunk_html,
     ".htm": chunk_html,
     ".md": chunk_md,
     ".pdf": chunk_pdf,
     ".ppt": chunk_ppt,
     ".pptx": chunk_pptx,
+    ".potx": chunk_pptx,
+    ".potm": chunk_pptx,
+    ".ppsx": chunk_pptx,
+    ".ppsm": chunk_pptx,
     ".txt": chunk_txt,
     ".xlsx": chunk_xlsx,
     ".xls": chunk_xlsx,
+    ".xlsm": chunk_xlsx,
+    ".xlsb": chunk_xlsx,
+    ".ods": chunk_xlsx,
+    ".xltx": chunk_xlsx,
+    ".xltm": chunk_xlsx,
 }
 
 _MD_DISPATCH = {
     ".doc":  _doc_to_markdown,
     ".docx": _docx_to_markdown,
+    ".docm": _docx_to_markdown,
+    ".dotx": _docx_to_markdown,
+    ".dotm": _docx_to_markdown,
     ".ppt":  _ppt_to_markdown,
     ".pptx": _pptx_to_markdown,
+    ".potx": _pptx_to_markdown,
+    ".potm": _pptx_to_markdown,
+    ".ppsx": _pptx_to_markdown,
+    ".ppsm": _pptx_to_markdown,
     ".pdf":  _pdf_to_markdown,
     ".html": _html_to_markdown,
     ".htm":  _html_to_markdown,
     ".xlsx": _xlsx_to_markdown,
     ".xls":  _xlsx_to_markdown,
+    ".xlsm": _xlsx_to_markdown,
+    ".xlsb": _xlsx_to_markdown,
+    ".ods":  _xlsx_to_markdown,
+    ".xltx": _xlsx_to_markdown,
+    ".xltm": _xlsx_to_markdown,
     ".txt":  _txt_to_markdown,
     ".md":   _md_to_markdown,
     ".csv":  _csv_to_markdown,
+    ".tsv":  _tsv_to_markdown,
+    ".msg":  _msg_to_markdown,
+    ".eml":  _eml_to_markdown,
+    ".mbox": _eml_to_markdown,
+    ".odt":  _odf_to_markdown,
+    ".odp":  _odf_to_markdown,
+    ".json": _json_to_markdown,
+    ".jsonl": _json_to_markdown,
+    ".ndjson": _json_to_markdown,
+    ".rtf":  _rtf_to_markdown,
+    ".epub": _epub_to_markdown,
+    ".ipynb": _ipynb_to_markdown,
 }
 
 _MD_IMAGE_DISPATCH: dict[str, Any] = {
     ".doc":  _doc_to_markdown_with_images,
     ".docx": _docx_to_markdown_with_images,
+    ".docm": _docx_to_markdown_with_images,
+    ".dotx": _docx_to_markdown_with_images,
+    ".dotm": _docx_to_markdown_with_images,
     ".ppt":  _ppt_to_markdown_with_images,
     ".pptx": _pptx_to_markdown_with_images,
+    ".potx": _pptx_to_markdown_with_images,
+    ".potm": _pptx_to_markdown_with_images,
+    ".ppsx": _pptx_to_markdown_with_images,
+    ".ppsm": _pptx_to_markdown_with_images,
     ".xlsx": _xlsx_to_markdown_with_images,
+    ".xlsm": _xlsx_to_markdown_with_images,
+    ".xltx": _xlsx_to_markdown_with_images,
+    ".xltm": _xlsx_to_markdown_with_images,
+    ".xlsb": _xlsx_to_markdown_with_images,
+    ".ods":  _xlsx_to_markdown_with_images,
     ".html": _html_to_markdown_with_images,
     ".htm":  _html_to_markdown_with_images,
     ".pdf":  _pdf_to_markdown_with_images,
+    ".epub": _epub_to_markdown_with_images,
+    ".ipynb": _ipynb_to_markdown_with_images,
+    ".eml":  _eml_to_markdown_with_images,
+    ".mbox": _eml_to_markdown_with_images,
+    ".odt":  _odf_to_markdown_with_images,
+    ".odp":  _odf_to_markdown_with_images,
 }
 
 _CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
     ".doc":  _chunk_doc_with_images,
     ".docx": _chunk_docx_with_images,
+    ".docm": _chunk_docx_with_images,
+    ".dotx": _chunk_docx_with_images,
+    ".dotm": _chunk_docx_with_images,
     ".ppt":  _chunk_ppt_with_images,
     ".pptx": _chunk_pptx_with_images,
+    ".potx": _chunk_pptx_with_images,
+    ".potm": _chunk_pptx_with_images,
+    ".ppsx": _chunk_pptx_with_images,
+    ".ppsm": _chunk_pptx_with_images,
     ".xlsx": _chunk_xlsx_with_images,
+    ".xlsm": _chunk_xlsx_with_images,
+    ".xltx": _chunk_xlsx_with_images,
+    ".xltm": _chunk_xlsx_with_images,
+    ".xlsb": _chunk_xlsx_with_images,
+    ".ods":  _chunk_xlsx_with_images,
     ".html": _chunk_html_with_images,
     ".htm":  _chunk_html_with_images,
     ".pdf":  _chunk_pdf_with_images,
+    ".epub": _chunk_epub_with_images,
+    ".ipynb": _chunk_ipynb_with_images,
+    ".eml":  _chunk_eml_with_images,
+    ".mbox": _chunk_eml_with_images,
+    ".odt":  _chunk_odf_with_images,
+    ".odp":  _chunk_odf_with_images,
 }
 
 
@@ -168,12 +270,44 @@ _EXT_CSV = ".csv"
 _EXT_PDF = ".pdf"
 _EXT_MD = ".md"
 _EXT_TXT = ".txt"
+_EXT_DOC = ".doc"
 _EXT_PPT = ".ppt"
 _EXT_PPTX = ".pptx"
+_EXT_MSG = ".msg"
+_EXT_EML = ".eml"
+_EXT_MBOX = ".mbox"
+_EXT_ODT = ".odt"
+_EXT_ODP = ".odp"
+_EXT_JSON = ".json"
+_EXT_JSONL = ".jsonl"
+_EXT_NDJSON = ".ndjson"
+_EXT_RTF = ".rtf"
+_EXT_EPUB = ".epub"
+_EXT_IPYNB = ".ipynb"
+
+# OOXML Word/PowerPoint variant families routed through the docx / pptx chunkers.
+# `.ppt` (legacy binary) is intentionally excluded — it uses the separate ppt chunker.
+_WORD_OOXML_EXTS = (".docx", ".docm", ".dotx", ".dotm")
+_PPTX_OOXML_EXTS = (".pptx", ".potx", ".potm", ".ppsx", ".ppsm")
 _EXT_HTML = ".html"
 _EXT_HTM = ".htm"
 _EXT_XLSX = ".xlsx"
 _EXT_XLS = ".xls"
+_EXT_TSV = ".tsv"
+
+# All calamine-backed spreadsheet formats routed through the xlsx chunker, and
+# all delimited-text formats routed through the csv chunker. Membership drives
+# the source-agnostic entry points (get_chunks / stream_chunks / …).
+_SPREADSHEET_EXTS = (_EXT_XLSX, _EXT_XLS, ".xlsm", ".xlsb", ".ods", ".xltx", ".xltm")
+_DELIMITED_EXTS = (_EXT_CSV, _EXT_TSV)
+
+
+def _delimiter_for(ext: str, delimiter: str | None) -> str | None:
+    """Default a .tsv file to a tab delimiter unless the caller overrode it."""
+    if delimiter is None and ext == _EXT_TSV:
+        return "\t"
+    return delimiter
+
 
 _SUPPORTED = ", ".join(sorted(_DISPATCH))
 
@@ -301,7 +435,7 @@ def get_chunks_from_path(
             return ChunksResult(chunks=chunk_list, images=images)
         else:
             # Unsupported format — silent fallback, no images
-            if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
+            if os.path.splitext(file_path)[1].lower() in _SPREADSHEET_EXTS:
                 chunks, _ = chunk_xlsx(
                     file_path,
                     mode="row" if mode == "default" else mode,
@@ -310,7 +444,7 @@ def get_chunks_from_path(
                     overlap=overlap,
                 )
                 return ChunksResult(chunks=chunks, images={})
-            if ext == _EXT_CSV:
+            if ext in _DELIMITED_EXTS:
                 csv_mode = "row" if mode == "default" else mode
                 rows_per_chunk = (
                     paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
@@ -323,7 +457,7 @@ def get_chunks_from_path(
                     window_size=window_size,
                     overlap=overlap,
                     include_headers=True,
-                    delimiter=delimiter,
+                    delimiter=_delimiter_for(ext, delimiter),
                     encoding=encoding,
                     skip_empty_rows=True,
                 )
@@ -334,7 +468,7 @@ def get_chunks_from_path(
             )
             return ChunksResult(chunks=chunks, images={})
 
-    if os.path.splitext(file_path)[1].lower() in (_EXT_XLSX, _EXT_XLS):
+    if os.path.splitext(file_path)[1].lower() in _SPREADSHEET_EXTS:
         chunks, _ = chunk_xlsx(
             file_path,
             mode="row" if mode == "default" else mode,
@@ -344,7 +478,7 @@ def get_chunks_from_path(
         )
         return chunks
 
-    if ext == _EXT_CSV:
+    if ext in _DELIMITED_EXTS:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
             paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
@@ -357,7 +491,7 @@ def get_chunks_from_path(
             window_size=window_size,
             overlap=overlap,
             include_headers=True,
-            delimiter=delimiter,
+            delimiter=_delimiter_for(ext, delimiter),
             encoding=encoding,
             skip_empty_rows=True,
         )
@@ -427,7 +561,7 @@ def get_chunks_from_bytes(
                 return ChunksResult(chunks=chunk_list, images=images)
             # Unsupported format — fall through to existing logic, wrap below
 
-        if ext in (_EXT_XLSX, _EXT_XLS):
+        if ext in _SPREADSHEET_EXTS:
             chunks, _ = chunk_xlsx(
                 tmp_path,
                 mode="row" if mode == "default" else mode,
@@ -439,7 +573,7 @@ def get_chunks_from_bytes(
                 return ChunksResult(chunks=chunks, images={})
             return chunks
 
-        if ext == _EXT_CSV:
+        if ext in _DELIMITED_EXTS:
             csv_mode = "row" if mode == "default" else mode
             rows_per_chunk = (
                 paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
@@ -452,7 +586,7 @@ def get_chunks_from_bytes(
                 window_size=window_size,
                 overlap=overlap,
                 include_headers=True,
-                delimiter=delimiter,
+                delimiter=_delimiter_for(ext, delimiter),
                 encoding=encoding,
                 skip_empty_rows=True,
             )
@@ -648,7 +782,7 @@ def stream_chunks_from_path(
 
     _, ext = _resolve_chunker(file_path)
 
-    if ext == _EXT_DOCX:
+    if ext in _WORD_OOXML_EXTS:
         return stream_chunk_docx(
             file_path,
             mode=mode,
@@ -659,6 +793,69 @@ def stream_chunks_from_path(
         )
     if ext == _EXT_PDF:
         return stream_chunk_pdf(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_MSG:
+        return stream_chunk_msg(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext in (_EXT_EML, _EXT_MBOX):
+        return stream_chunk_eml(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext in (_EXT_ODT, _EXT_ODP):
+        return stream_chunk_odf(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext in (_EXT_JSON, _EXT_JSONL, _EXT_NDJSON):
+        return stream_chunk_json(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_RTF:
+        return stream_chunk_rtf(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_EPUB:
+        return stream_chunk_epub(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+    if ext == _EXT_IPYNB:
+        return stream_chunk_ipynb(
             file_path,
             mode=mode,
             window_size=window_size,
@@ -684,6 +881,15 @@ def stream_chunks_from_path(
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
         )
+    if ext == _EXT_DOC:
+        return stream_chunk_doc(
+            file_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
     if ext == _EXT_PPT:
         return stream_chunk_ppt(
             file_path,
@@ -693,7 +899,7 @@ def stream_chunks_from_path(
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
         )
-    if ext == _EXT_PPTX:
+    if ext in _PPTX_OOXML_EXTS:
         return stream_chunk_pptx(
             file_path,
             mode=mode,
@@ -702,7 +908,7 @@ def stream_chunks_from_path(
             sentences_per_chunk=sentences_per_chunk,
             paragraphs_per_page=paragraphs_per_page,
         )
-    if ext in (_EXT_XLSX, _EXT_XLS):
+    if ext in _SPREADSHEET_EXTS:
         return stream_chunk_xlsx(
             file_path,
             mode="row" if mode == "default" else mode,
@@ -710,7 +916,7 @@ def stream_chunks_from_path(
             window_size=window_size,
             overlap=overlap,
         )
-    if ext == _EXT_CSV:
+    if ext in _DELIMITED_EXTS:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
             paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
@@ -723,7 +929,7 @@ def stream_chunks_from_path(
             window_size=window_size,
             overlap=overlap,
             include_headers=True,
-            delimiter=delimiter,
+            delimiter=_delimiter_for(ext, delimiter),
             encoding=encoding,
             skip_empty_rows=True,
         )
@@ -781,7 +987,7 @@ def stream_chunks_from_bytes(
         tmp.write(data)
         tmp_path = tmp.name
 
-    if ext == _EXT_DOCX:
+    if ext in _WORD_OOXML_EXTS:
         iterator = stream_chunk_docx(
             tmp_path,
             mode=mode,
@@ -793,6 +999,76 @@ def stream_chunks_from_bytes(
         return _StreamingFileCleanup(iterator, tmp_path)
     if ext == _EXT_PDF:
         iterator = stream_chunk_pdf(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_MSG:
+        iterator = stream_chunk_msg(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext in (_EXT_EML, _EXT_MBOX):
+        iterator = stream_chunk_eml(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext in (_EXT_ODT, _EXT_ODP):
+        iterator = stream_chunk_odf(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext in (_EXT_JSON, _EXT_JSONL, _EXT_NDJSON):
+        iterator = stream_chunk_json(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_RTF:
+        iterator = stream_chunk_rtf(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_EPUB:
+        iterator = stream_chunk_epub(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_IPYNB:
+        iterator = stream_chunk_ipynb(
             tmp_path,
             mode=mode,
             window_size=window_size,
@@ -821,6 +1097,16 @@ def stream_chunks_from_bytes(
             paragraphs_per_page=paragraphs_per_page,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
+    if ext == _EXT_DOC:
+        iterator = stream_chunk_doc(
+            tmp_path,
+            mode=mode,
+            window_size=window_size,
+            overlap=overlap,
+            sentences_per_chunk=sentences_per_chunk,
+            paragraphs_per_page=paragraphs_per_page,
+        )
+        return _StreamingFileCleanup(iterator, tmp_path)
     if ext == _EXT_PPT:
         iterator = stream_chunk_ppt(
             tmp_path,
@@ -831,7 +1117,7 @@ def stream_chunks_from_bytes(
             paragraphs_per_page=paragraphs_per_page,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
-    if ext == _EXT_PPTX:
+    if ext in _PPTX_OOXML_EXTS:
         iterator = stream_chunk_pptx(
             tmp_path,
             mode=mode,
@@ -841,7 +1127,7 @@ def stream_chunks_from_bytes(
             paragraphs_per_page=paragraphs_per_page,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
-    if ext in (_EXT_XLSX, _EXT_XLS):
+    if ext in _SPREADSHEET_EXTS:
         iterator = stream_chunk_xlsx(
             tmp_path,
             mode="row" if mode == "default" else mode,
@@ -850,7 +1136,7 @@ def stream_chunks_from_bytes(
             overlap=overlap,
         )
         return _StreamingFileCleanup(iterator, tmp_path)
-    if ext == _EXT_CSV:
+    if ext in _DELIMITED_EXTS:
         csv_mode = "row" if mode == "default" else mode
         rows_per_chunk = (
             paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
@@ -863,7 +1149,7 @@ def stream_chunks_from_bytes(
             window_size=window_size,
             overlap=overlap,
             include_headers=True,
-            delimiter=delimiter,
+            delimiter=_delimiter_for(ext, delimiter),
             encoding=encoding,
             skip_empty_rows=True,
         )

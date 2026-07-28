@@ -13,6 +13,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 pub const REC_VER_CONTAINER: u16 = 0xF;
 
 // OfficeArt record types used by the image extractors.
+// Part of the ODRAW record-type registry; currently referenced only from tests.
+#[allow(dead_code)]
 pub const RT_DGG_CONTAINER: u16 = 0xF000; // OfficeArtDggContainer (drawing group)
 pub const RT_BSTORE_CONTAINER: u16 = 0xF001; // OfficeArtBStoreContainer (blip store)
 pub const RT_FBSE: u16 = 0xF007; // OfficeArtFBSE (file blip store entry)

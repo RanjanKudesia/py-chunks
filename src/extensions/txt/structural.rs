@@ -7,7 +7,7 @@ use std::fs;
 use std::time::Instant;
 
 use super::common::{
-    classify_block, classify_prose, extract_heading_text, parse_txt_blocks, split_at_sentences,
+    classify_prose, extract_heading_text, parse_txt_blocks, split_at_sentences,
     txt_metadata, ChunkRecordInput, ContentType, MAX_CHUNK_CHARS, MIN_CHUNK_CHARS,
 };
 

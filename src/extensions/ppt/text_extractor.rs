@@ -266,7 +266,7 @@ fn parse_slwt_children(data: &[u8], start: usize, end: usize, slides: &mut Vec<V
     let mut cur_txtype: Option<u32> = None;
     let mut started = false;
 
-    let mut flush = |runs: &mut Vec<Run>, slides: &mut Vec<Vec<DocParagraph>>| {
+    let flush = |runs: &mut Vec<Run>, slides: &mut Vec<Vec<DocParagraph>>| {
         let slide = build_slide_from_runs(runs);
         runs.clear();
         if !slide.is_empty() {

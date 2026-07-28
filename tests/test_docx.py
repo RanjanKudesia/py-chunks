@@ -108,7 +108,8 @@ class TestDocxStructural:
         valid = {
             "heading", "mixed_content", "table", "plain_paragraph",
             "bullet_list", "code_block", "long_single_paragraph",
-            "short_disconnected_paragraph",
+            "short_disconnected_paragraph", "image", "footnote_caption",
+            "header_footer",
         }
         for c in _get(docx_file, "structural"):
             assert c["content_type"] in valid, (

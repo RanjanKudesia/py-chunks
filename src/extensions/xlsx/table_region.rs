@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::Read;
 use std::time::Instant;
 
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{Data, Reader};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
@@ -278,7 +278,7 @@ pub fn build_table_chunks(
     }
 
     let mut workbook =
-        open_workbook_auto(file_path).map_err(|e| format!("Failed to open workbook: {e}"))?;
+        super::common::open_spreadsheet(file_path)?;
 
     let workbook_sheet_names = workbook.sheet_names().to_vec();
     let selected_sheets = if sheet_names.is_empty() {
@@ -305,9 +305,7 @@ pub fn build_table_chunks(
             .position(|name| name == &sheet_name)
             .unwrap_or(0);
 
-        let range = workbook
-            .worksheet_range(&sheet_name)
-            .map_err(|e| format!("Failed to read sheet '{sheet_name}': {e}"))?;
+        let range = super::common::read_worksheet_range(&mut workbook, &sheet_name)?;
         let base_row_index = range.start().map(|(row, _)| row as usize).unwrap_or(0);
         let rows: Vec<&[Data]> = range.rows().collect();
         if rows.is_empty() {
@@ -468,10 +466,10 @@ pub fn chunk_xlsx_table(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<PyObject> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
     if max_chunk_chars == 0 {

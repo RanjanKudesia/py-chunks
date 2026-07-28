@@ -22,6 +22,8 @@ from py_chunks.chunkers.txt import chunk_txt, stream_chunk_txt
 _CANDIDATE_DIRS = [
     Path(__file__).resolve().parents[2] / "test_files",
     Path(__file__).resolve().parents[2] / "test_input_files",
+    # Fixtures were reorganised into per-format subdirectories.
+    Path(__file__).resolve().parents[2] / "test_files" / "txt",
 ]
 
 _TXT_NAMES = ["prose_article.txt", "structured_report.txt", "test.txt"]

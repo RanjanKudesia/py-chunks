@@ -9,6 +9,16 @@ _XLSX_MODES = {"row", "table", "sheet",
                "sliding_window", "page_aware", "semantic"}
 _XLSX_SERIALIZERS = {"key_value"}
 
+# Every calamine-readable spreadsheet extension routed through this chunker.
+# Must stay in sync with SPREADSHEET_EXTS in src/extensions/xlsx/common.rs.
+_XLSX_SUFFIXES = (".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".xltx", ".xltm")
+
+# Formats with working embedded-image extraction. The Xlsx OOXML family and .xlsb
+# go through the OOXML drawing walker (.xlsb via a sheetN.bin.rels fallback); .ods
+# goes through a dedicated ODF walker (Pictures/ + content.xml draw:image). Only
+# .xls (OLE, no drawing parts calamine exposes) returns an empty image dict.
+_XLSX_IMAGE_SUFFIXES = (".xlsx", ".xlsm", ".xltx", ".xltm", ".xlsb", ".ods")
+
 
 def _validate_xlsx_args(
     file_path: str,
@@ -22,8 +32,9 @@ def _validate_xlsx_args(
 ) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
-    if path.suffix.lower() not in (".xlsx", ".xls"):
-        raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
+    if path.suffix.lower() not in _XLSX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_XLSX_SUFFIXES)}, got: {file_path}")
     if mode not in _XLSX_MODES:
         raise ValueError(
             f"mode must be one of {sorted(_XLSX_MODES)} for XLSX, got: '{mode}'"
@@ -164,8 +175,9 @@ def xlsx_to_markdown(file_path: str) -> str:
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
-    if path.suffix.lower() not in (".xlsx", ".xls"):
-        raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
+    if path.suffix.lower() not in _XLSX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_XLSX_SUFFIXES)}, got: {file_path}")
     return _rust.xlsx_to_markdown(str(path))
 
 
@@ -182,10 +194,12 @@ def chunk_xlsx_with_images(
     sentences_per_chunk: int | None = None,
     paragraphs_per_page: int | None = None,
 ) -> tuple[list[dict], dict[str, bytes]]:
-    """Chunk an XLSX/XLS file and extract embedded XLSX images as image chunks.
+    """Chunk a spreadsheet and extract embedded images as image chunks.
 
-    For .xlsx, images are extracted and returned as a dict keyed by hash filename.
-    For .xls, image extraction is unsupported and returns an empty dict.
+    Images are returned as a dict keyed by hash filename for the Xlsx OOXML family
+    (.xlsx/.xlsm/.xltx/.xltm), .xlsb (via a sheetN.bin.rels fallback), and .ods
+    (via the ODF Pictures/ walker). For .xls, image extraction is unsupported and
+    returns an empty dict.
     """
     path = Path(file_path)
     normalized_mode = "row" if mode == "default" else mode
@@ -220,15 +234,17 @@ def chunk_xlsx_with_images(
 
 
 def xlsx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
-    """Convert an XLSX/XLS file to Markdown and extract embedded XLSX images.
+    """Convert a spreadsheet to Markdown and extract embedded images.
 
-    For .xlsx, markdown includes ![](hash.ext) references after each sheet section.
-    For .xls, conversion succeeds and image dict is empty.
+    Markdown includes ![](hash.ext) references after each sheet section for the
+    Xlsx OOXML family, .xlsb, and .ods. For .xls, conversion succeeds and the
+    image dict is empty.
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
-    if path.suffix.lower() not in (".xlsx", ".xls"):
-        raise ValueError(f"Expected a .xlsx or .xls file, got: {file_path}")
+    if path.suffix.lower() not in _XLSX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_XLSX_SUFFIXES)}, got: {file_path}")
     md, image_list = _rust.xlsx_to_markdown_with_images(str(path))
     return md, dict(image_list)

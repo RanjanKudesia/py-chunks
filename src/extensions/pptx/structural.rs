@@ -46,7 +46,7 @@ pub fn build_structural_chunks(bytes: &[u8]) -> Result<Vec<ChunkRecordInput>, St
     }
 
     if raw.is_empty() {
-        return Err("No text content found in PPTX document".to_string());
+        return Ok(Vec::new()); // empty deck → empty chunk list (consistent with docx/txt/…)
     }
 
     // Merge short consecutive same-slide chunks.
@@ -104,9 +104,10 @@ fn emit_chunks(
 
 #[pyfunction]
 pub fn chunk_pptx(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes = fs::read(file_path)
@@ -120,9 +121,10 @@ pub fn chunk_pptx(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
 
 #[pyfunction]
 pub fn chunk_pptx_structural(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes = fs::read(file_path)
@@ -156,9 +158,10 @@ fn chunk_pptx_with_images_impl(
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
     use super::common::{collect_all_slide_images, collect_slide_names, open_pptx};
 
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     let bytes = fs::read(file_path)

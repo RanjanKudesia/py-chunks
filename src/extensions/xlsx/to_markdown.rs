@@ -1,10 +1,10 @@
-use calamine::{open_workbook_auto, Data, Reader};
+use calamine::{Data, Reader};
 use pyo3::exceptions::{PyIOError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyModule};
 use pyo3::wrap_pyfunction;
 
-use super::images::collect_all_sheet_images;
+use super::images::collect_spreadsheet_images;
 
 use super::common::{cell_to_string, detect_header_row, row_is_empty_public};
 
@@ -56,23 +56,22 @@ fn render_sheet_markdown(sheet_name: &str, rows: &[Vec<String>], has_header: boo
 
 #[pyfunction]
 pub fn xlsx_to_markdown(file_path: &str) -> PyResult<String> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
 
-    let mut workbook = open_workbook_auto(file_path)
-        .map_err(|e| PyIOError::new_err(format!("Failed to open workbook: {e}")))?;
+    let mut workbook = super::common::open_spreadsheet(file_path)
+        .map_err(PyIOError::new_err)?;
 
     let sheet_names = workbook.sheet_names().to_vec();
     let mut parts: Vec<String> = Vec::new();
 
     for sheet_name in &sheet_names {
-        let range = workbook.worksheet_range(sheet_name).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to read sheet '{sheet_name}': {e}"))
-        })?;
+        let range = super::common::read_worksheet_range(&mut workbook, sheet_name)
+            .map_err(PyRuntimeError::new_err)?;
 
         let raw_rows: Vec<&[Data]> = range.rows().collect();
         if raw_rows.is_empty() || raw_rows.iter().all(|r| row_is_empty_public(r)) {
@@ -118,20 +117,20 @@ pub fn xlsx_to_markdown_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
-    let lower = file_path.to_ascii_lowercase();
-    if !lower.ends_with(".xlsx") && !lower.ends_with(".xls") {
+    if !super::common::is_supported_spreadsheet(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .xlsx or .xls file path, got: {file_path}"
+            "Expected a spreadsheet file ({}), got: {file_path}",
+            super::common::supported_spreadsheet_exts_display()
         )));
     }
 
-    let mut workbook = open_workbook_auto(file_path)
-        .map_err(|e| PyIOError::new_err(format!("Failed to open workbook: {e}")))?;
+    let mut workbook = super::common::open_spreadsheet(file_path)
+        .map_err(PyIOError::new_err)?;
 
     let sheet_names = workbook.sheet_names().to_vec();
 
     let mut image_out: Vec<(String, Vec<u8>)> = Vec::new();
-    let image_infos = collect_all_sheet_images(file_path, &sheet_names, &mut image_out);
+    let image_infos = collect_spreadsheet_images(file_path, &sheet_names, &mut image_out);
     let mut sheet_image_map: std::collections::HashMap<usize, Vec<String>> =
         std::collections::HashMap::new();
     for info in image_infos {
@@ -144,12 +143,24 @@ pub fn xlsx_to_markdown_with_images(
     let mut parts: Vec<String> = Vec::new();
 
     for (sheet_idx, sheet_name) in sheet_names.iter().enumerate() {
-        let range = workbook.worksheet_range(sheet_name).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to read sheet '{sheet_name}': {e}"))
-        })?;
+        let range = super::common::read_worksheet_range(&mut workbook, sheet_name)
+            .map_err(PyRuntimeError::new_err)?;
+
+        let sheet_images = sheet_image_map.get(&sheet_idx);
 
         let raw_rows: Vec<&[Data]> = range.rows().collect();
-        if raw_rows.is_empty() || raw_rows.iter().all(|r| row_is_empty_public(r)) {
+        let no_data = raw_rows.is_empty() || raw_rows.iter().all(|r| row_is_empty_public(r));
+
+        // An image-only sheet (pictures but no cell data) still deserves a
+        // section so its ![](hash) references aren't silently dropped.
+        if no_data {
+            if let Some(hashes) = sheet_images {
+                let mut section = format!("## {sheet_name}");
+                for hash_name in hashes {
+                    section.push_str(&format!("\n\n![]({hash_name})"));
+                }
+                parts.push(section);
+            }
             continue;
         }
 
@@ -184,7 +195,7 @@ pub fn xlsx_to_markdown_with_images(
         }
 
         let mut section = rendered;
-        if let Some(hashes) = sheet_image_map.get(&sheet_idx) {
+        if let Some(hashes) = sheet_images {
             for hash_name in hashes {
                 section.push_str(&format!("\n\n![]({hash_name})"));
             }

@@ -2,7 +2,7 @@
 /// MD chunking strategy.
 // Re-export shared utilities so strategy files can keep importing from super::common.
 pub use super::super::shared::{
-    has_keyword_overlap, split_at_sentences, split_sentences, tokenize_keywords,
+    has_keyword_overlap, split_at_sentences, tokenize_keywords,
 };
 
 /// Classify prose length into a ContentType variant.

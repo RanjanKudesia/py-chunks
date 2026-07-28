@@ -30,7 +30,7 @@ pub fn build_page_aware_chunks(bytes: &[u8], slides_per_chunk: usize) -> Result<
         units.push((slide_num, text, slide.title));
     }
 
-    if units.is_empty() { return Err("No text content found".to_string()); }
+    if units.is_empty() { return Ok(Vec::new()); }
 
     let mut result: Vec<ChunkRecordInput> = Vec::new();
     let mut chunk_index = 0usize;
@@ -63,8 +63,11 @@ pub fn build_page_aware_chunks(bytes: &[u8], slides_per_chunk: usize) -> Result<
 
 #[pyfunction]
 pub fn chunk_pptx_page_aware(py: Python<'_>, file_path: &str, slides_per_chunk: usize) -> PyResult<PyObject> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
-        return Err(PyValueError::new_err(format!("Expected .pptx file path, got: {file_path}")));
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
+        return Err(PyValueError::new_err(format!(
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
+        )));
     }
     if slides_per_chunk == 0 { return Err(PyValueError::new_err("slides_per_chunk must be > 0")); }
     let bytes = fs::read(file_path).map_err(|e| PyIOError::new_err(format!("{e}")))?;
@@ -90,9 +93,10 @@ pub fn chunk_pptx_page_aware_with_images(
     file_path: &str,
     slides_per_chunk: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    if !file_path.to_ascii_lowercase().ends_with(".pptx") {
+    if !crate::extensions::pptx::common::is_pptx_ooxml(file_path) {
         return Err(PyValueError::new_err(format!(
-            "Expected .pptx file path, got: {file_path}"
+            "Expected a PowerPoint OOXML file ({}), got: {file_path}",
+            crate::extensions::pptx::common::pptx_exts_display()
         )));
     }
     if slides_per_chunk == 0 {

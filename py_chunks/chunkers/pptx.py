@@ -7,6 +7,7 @@ from pathlib import Path
 
 from py_chunks import _rust
 
+_PPTX_SUFFIXES = (".pptx", ".potx", ".potm", ".ppsx", ".ppsm")
 _PPTX_MODES = {
     "default", "structural", "semantic", "section",
     "sliding_window", "sentence", "page_aware",
@@ -25,8 +26,9 @@ def _validate_pptx_args(
     """Raise descriptive errors for invalid chunk_pptx arguments."""
     if not path.is_file():
         raise FileNotFoundError(f"PPTX file not found: {file_path}")
-    if path.suffix.lower() != ".pptx":
-        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    if path.suffix.lower() not in _PPTX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
     if mode not in _PPTX_MODES:
         raise ValueError(
             f"mode must be one of {sorted(_PPTX_MODES)} for PPTX, got: '{mode}'"
@@ -146,8 +148,9 @@ def stream_chunk_pptx(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PPTX file not found: {file_path}")
-    if path.suffix.lower() != ".pptx":
-        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    if path.suffix.lower() not in _PPTX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
     if mode not in _PPTX_MODES:
         raise ValueError(
             f"mode must be one of {sorted(_PPTX_MODES)} for PPTX streaming, got: '{mode}'"
@@ -163,8 +166,9 @@ def pptx_to_markdown(file_path: str) -> str:
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PPTX file not found: {file_path}")
-    if path.suffix.lower() != ".pptx":
-        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    if path.suffix.lower() not in _PPTX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
     return _rust.pptx_to_markdown(str(path))
 
 
@@ -173,8 +177,9 @@ def pptx_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PPTX file not found: {file_path}")
-    if path.suffix.lower() != ".pptx":
-        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    if path.suffix.lower() not in _PPTX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
     md, image_list = _rust.pptx_to_markdown_with_images(str(path))
     return md, dict(image_list)
 
@@ -195,8 +200,9 @@ def chunk_pptx_with_images(
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PPTX file not found: {file_path}")
-    if path.suffix.lower() != ".pptx":
-        raise ValueError(f"Expected a .pptx file, got: {file_path}")
+    if path.suffix.lower() not in _PPTX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
 
     _slides = slides_per_chunk if slides_per_chunk is not None else paragraphs_per_page
     normalized_mode = "structural" if mode == "default" else mode

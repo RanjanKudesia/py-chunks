@@ -1,13 +1,21 @@
 import pytest
 from pathlib import Path
 
-FIXTURES_DIR = Path(__file__).parent / "fixtures"
+# Real fixtures live at <repo>/test_files (see _spreadsheet_fixtures.py). The
+# perf fixtures (1mb/100mb .doc) are excluded so the suite stays fast; they are
+# exercised by the dedicated performance benchmark, not the functional matrix.
+FIXTURES_DIR = Path(__file__).resolve().parents[2] / "test_files" / "doc"
+_MAX_FIXTURE_BYTES = 5 * 1024 * 1024
 
 
 def doc_files():
     if not FIXTURES_DIR.exists():
         return []
-    return list(FIXTURES_DIR.glob("*.doc"))
+    return [
+        p
+        for p in sorted(FIXTURES_DIR.glob("*.doc"))
+        if p.stat().st_size <= _MAX_FIXTURE_BYTES
+    ]
 
 
 has_fixtures = len(doc_files()) > 0
@@ -142,3 +150,18 @@ def test_stream_matches_batch(doc_path):
     assert len(batch) == len(streamed)
     for b, s in zip(batch, streamed):
         assert b["content"] == s["content"]
+
+
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.parametrize("doc_path", doc_files())
+def test_no_oversized_chunks_and_no_nul(doc_path):
+    """Regression: a paragraph with no breaks (e.g. examplefile.com's padded
+    1mb.doc) must not surface as one unsplittable mega-chunk, and NUL/control
+    bytes must never leak into extracted text."""
+    chunks, _ = chunk_doc(str(doc_path))
+    # Cap is MAX_CHUNK_CHARS (1200) plus a small tolerance for trim/boundary slack.
+    for c in chunks:
+        assert len(c["content"]) <= 1400, (
+            f"{doc_path.name}: oversized chunk of {len(c['content'])} chars"
+        )
+        assert "\x00" not in c["content"], f"{doc_path.name}: NUL leaked into text"
