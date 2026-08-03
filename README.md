@@ -1,5 +1,8 @@
 # py-chunks
 
+> **Part of [chunk-engine](https://github.com/RanjanKudesia/chunk-engine)** — one Rust engine, three byte-identical SDKs ([py-chunks](https://pypi.org/project/py-chunks/) · [js-chunks](https://www.npmjs.com/package/js-chunks) · [rs-chunks](https://crates.io/crates/rs-chunks)).
+> Docs, playground and benchmarks: **[chunkengine.dev](https://www.chunkengine.dev)** — and a ⭐ on the [hub repo](https://github.com/RanjanKudesia/chunk-engine) helps a lot.
+
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Fast, framework-agnostic document chunking library backed by Rust. Extract meaningful content segments from DOCX, DOC, PDF, PPTX, PPT, TXT, Markdown, HTML, CSV, TSV, XLSX, XLS, XLSM, XLSB, ODS, XLTX, and XLTM files — optimised for production use.
