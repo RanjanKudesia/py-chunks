@@ -22,3 +22,8 @@ tests/dist/
 
 # Local AI working-instructions file — not part of the published project
 CLAUDE.md
+
+# Internal working docs — local only, never published.
+# Canonical tracker: ../TECH_DEBT.md (workspace root)
+/TECH_DEBT.md
+/CLAUDE.md
