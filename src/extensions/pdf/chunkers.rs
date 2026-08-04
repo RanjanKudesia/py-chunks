@@ -89,7 +89,7 @@ fn run_mode(
     ensure_pdf(file_path)?;
     let start = Instant::now();
     let conv = backend_to_markdown(file_path, false).map_err(PyRuntimeError::new_err)?;
-    if conv.markdown.trim().is_empty() {
+    if conv.markdown.trim().is_empty() && conv.images.is_empty() {
         return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
     }
     let mut records = chunks_for_mode(
@@ -177,7 +177,7 @@ fn pdf_to_markdown_with_images(
 fn empty_pdf_error(total_pages: usize) -> String {
     format!(
         "PDF contains no extractable text ({total_pages} page(s) scanned or image-only). \
-         OCR is not enabled, and page-image rendering is not implemented, so there is nothing to return."
+         OCR is not enabled; pass list_images to get one rendered image per page."
     )
 }
 
@@ -187,7 +187,7 @@ fn pdf_to_markdown_impl(
     embed_images: bool,
 ) -> PyResult<(String, Vec<(String, Vec<u8>)>)> {
     let conv = backend_to_markdown(file_path, embed_images).map_err(PyIOError::new_err)?;
-    if conv.markdown.trim().is_empty() {
+    if conv.markdown.trim().is_empty() && conv.images.is_empty() {
         return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
     }
     let images = conv.images.into_iter().map(|i| (i.name, i.bytes)).collect();
@@ -213,19 +213,26 @@ fn chunk_pdf_with_images(
     let normalized_mode = if mode == "default" { "default" } else { mode };
 
     let conv = backend_to_markdown(file_path, true).map_err(PyRuntimeError::new_err)?;
-    if conv.markdown.trim().is_empty() {
+    if conv.markdown.trim().is_empty() && conv.images.is_empty() {
         return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
     }
     let images = conv.images;
-    let mut records = chunks_for_mode(
-        conv.markdown.as_bytes(),
-        normalized_mode,
-        window_size,
-        overlap,
-        sentences_per_chunk,
-        paragraphs_per_page,
-    )
-    .map_err(PyRuntimeError::new_err)?;
+    // A scanned PDF has no markdown to chunk — the rendered page images ARE the
+    // output. Running the Markdown chunker on an empty string would fail with
+    // "Markdown file is empty after decoding" and throw the images away.
+    let mut records = if conv.markdown.trim().is_empty() {
+        Vec::new()
+    } else {
+        chunks_for_mode(
+            conv.markdown.as_bytes(),
+            normalized_mode,
+            window_size,
+            overlap,
+            sentences_per_chunk,
+            paragraphs_per_page,
+        )
+        .map_err(PyRuntimeError::new_err)?
+    };
     inject_pdf_metadata(&mut records, conv.total_pages);
 
     // Image chunks first (content_type="image"), then the text chunks — matching
@@ -282,7 +289,7 @@ fn stream_pdf_chunks(
 ) -> PyResult<Py<PdfStreamIterator>> {
     ensure_pdf(file_path)?;
     let conv = backend_to_markdown(file_path, false).map_err(PyRuntimeError::new_err)?;
-    if conv.markdown.trim().is_empty() {
+    if conv.markdown.trim().is_empty() && conv.images.is_empty() {
         return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
     }
     let mut records = chunks_for_mode(
