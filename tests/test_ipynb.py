@@ -95,12 +95,21 @@ def test_legacy_heading_and_malformed_output_no_crash():
     assert isinstance(chunks, list) and chunks
 
 
-def test_image_only_notebook_returns_empty_not_error():
-    """A notebook of only image references (no prose) → [] rather than raising."""
+def test_image_only_notebook_surfaces_its_image_references():
+    """A notebook of only image references must not come back empty.
+
+    This asserted `chunks == []` — the behaviour tracked as defect #42. The
+    notebook's entire content is three image references (one Markdown, two raw
+    <img>), and returning nothing for a valid file is total content loss, not a
+    graceful empty case. Images now leave the same `[Image]` placeholder that
+    docx and pptx already emit.
+    """
     m = [f for f in IPYNB if f.name == "nbc_embed_images.ipynb"]
     require(m)
     chunks = get_chunks(str(m[0]))
-    assert chunks == []
+    assert chunks, "an image-only notebook must still yield a chunk"
+    text = "\n".join(c["content"] for c in chunks)
+    assert text.count("[Image") == 3, f"expected all 3 references, got: {text!r}"
 
 
 def test_non_json_raises_clean_error(tmp_path):
