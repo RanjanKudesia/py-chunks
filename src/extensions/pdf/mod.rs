@@ -1,14 +1,13 @@
-//! PDF support, backed by the `liteparse` crate for high-quality PDF → markdown
-//! conversion, with chunking delegated to the Markdown chunker.
+//! PDF support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::pdf`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
 
-pub mod author_block;
 pub mod chunkers;
-pub mod liteparse_backend;
 
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-
-pub(crate) fn register(m: &pyo3::Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     chunkers::register(m)?;
+    chunkers::register_images(m)?;
+    chunkers::register_extra(m)?;
     Ok(())
 }

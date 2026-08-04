@@ -139,4 +139,7 @@ def md_to_markdown(file_path: str) -> str:
         raise FileNotFoundError(f"Markdown file not found: {file_path}")
     if path.suffix.lower() != ".md":
         raise ValueError(f"Expected a .md file, got: {file_path}")
-    return path.read_text(encoding="utf-8", errors="replace")
+    # Decoded by the engine, not read as UTF-8 here — same defect as TECH_DEBT
+    # #75 in the .txt path: a cp1252 or UTF-16 file came back corrupted while
+    # get_chunks on the same file was correct.
+    return _rust.md_to_markdown(str(path))
