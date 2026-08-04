@@ -69,6 +69,12 @@ if not ALL_DOCX_FILES:
 
 DOCX_IDS = [f.name for f in ALL_DOCX_FILES]
 
+# Word supports nine heading levels, not six. `<w:outlineLvl>` is 0-based and
+# valid for 0-8, so a heading can legitimately report level 9 — poi_bug59058.docx
+# uses outlineLvl 6 and must report 7. The old 1-6 bound was borrowed from HTML's
+# h1-h6 and failed on a document the engine reads correctly.
+MAX_HEADING_LEVEL = 9
+
 STANDARD_KEYS = {"content", "content_type", "metadata"}
 
 
@@ -148,7 +154,7 @@ class TestDocxStructural:
     def test_section_heading_level_valid(self, docx_file):
         for c in _get(docx_file, "structural"):
             lvl = c["metadata"]["section_heading_level"]
-            assert lvl is None or (isinstance(lvl, int) and 1 <= lvl <= 6), (
+            assert lvl is None or (isinstance(lvl, int) and 1 <= lvl <= MAX_HEADING_LEVEL), (
                 f"{docx_file.name}: section_heading_level={lvl!r}"
             )
 
@@ -233,7 +239,7 @@ class TestDocxSemantic:
     def test_section_heading_level_valid(self, docx_file):
         for c in _get(docx_file, "semantic"):
             lvl = c["metadata"]["section_heading_level"]
-            assert lvl is None or (isinstance(lvl, int) and 1 <= lvl <= 6), (
+            assert lvl is None or (isinstance(lvl, int) and 1 <= lvl <= MAX_HEADING_LEVEL), (
                 f"{docx_file.name}: section_heading_level={lvl!r}"
             )
 
@@ -282,8 +288,8 @@ class TestDocxSection:
         # 0 = preamble (content before the first heading), 1-6 = heading levels
         for c in _get(docx_file, "section"):
             lvl = c["metadata"]["section_level"]
-            assert isinstance(lvl, int) and 0 <= lvl <= 6, (
-                f"{docx_file.name}: section_level={lvl!r} must be 0-6"
+            assert isinstance(lvl, int) and 0 <= lvl <= MAX_HEADING_LEVEL, (
+                f"{docx_file.name}: section_level={lvl!r} must be 0-{MAX_HEADING_LEVEL}"
             )
 
     def test_section_heading_level_matches_section_level(self, docx_file):
@@ -489,7 +495,7 @@ class TestDocxSentence:
             meta = c["metadata"]
             if meta["source_paragraph_is_heading"]:
                 lvl = meta["source_paragraph_heading_level"]
-                assert isinstance(lvl, int) and 1 <= lvl <= 6, (
+                assert isinstance(lvl, int) and 1 <= lvl <= MAX_HEADING_LEVEL, (
                     f"{docx_file.name}: heading_level={lvl!r} for heading chunk"
                 )
 
