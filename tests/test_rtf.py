@@ -104,6 +104,95 @@ def test_invalid_unicode_no_panic():
     assert isinstance(md, str)  # got here without a panic
 
 
+# ── Character formatting survives as markdown emphasis ────────────────────────
+
+def test_bold_and_italic_become_emphasis():
+    md = get_markdown(str(_pick("tika_testRTFBoldItalic.rtf")))
+    lines = md.splitlines()
+    assert lines[0] == "**bold**"
+    assert lines[1] == "**bold** ***italic***"
+    assert lines[3] == "*italic*"
+
+
+def test_emphasis_wraps_only_its_own_run():
+    """Buffered bytes must flush before `\\b`/`\\i` changes under them."""
+    md = get_markdown(str(_pick("tika_testRTFHyperlink.rtf")))
+    assert "**Type a question for help**" in md
+    assert "**Contact Us**" in md
+
+
+def test_emphasis_markers_are_well_formed():
+    for f in RTF:
+        for line in get_markdown(str(f)).splitlines():
+            assert line.count("*") % 2 == 0, f"unbalanced emphasis in {f.name}: {line}"
+            assert "****" not in line, f"empty emphasis span in {f.name}: {line}"
+
+
+# ── Body headings come from paragraph styles ──────────────────────────────────
+
+def test_heading_styles_become_headings():
+    """LibreOffice keeps `heading 1/2/3` when converting the POI original."""
+    md = get_markdown(str(_pick("conv_libreoffice_heading123.rtf")))
+    lines = md.splitlines()
+    assert lines[0] == "# First paragraph"
+    assert "## Second paragraph" in lines
+    assert "### Third paragraph" in lines
+    assert sum(1 for line in lines if line.startswith("#")) == 3
+
+
+def test_headings_reach_chunk_metadata():
+    chunks, _ = chunk_rtf(str(_pick("conv_libreoffice_heading123.rtf")), mode="semantic")
+    headings = [c for c in chunks if c["content_type"] == "heading"]
+    assert [c["content"] for c in headings] == [
+        "First paragraph", "Second paragraph", "Third paragraph",
+    ]
+    assert headings[2]["metadata"]["heading_path"] == [
+        "First paragraph", "Second paragraph", "Third paragraph",
+    ]
+
+
+def test_no_headings_without_a_stylesheet():
+    """Apple's `textutil` drops the styles, so there is nothing to detect."""
+    md = get_markdown(str(_pick("conv_apple_heading123.rtf")))
+    assert md.startswith("First paragraph")
+    assert "#" not in md
+
+
+# ── Symbol-font list markers ──────────────────────────────────────────────────
+
+def test_list_markers_are_markdown_not_glyphs():
+    for name in ("tika_testRTFListLibreOffice.rtf", "tika_testRTFListMicrosoftWord.rtf"):
+        md = get_markdown(str(_pick(name)))
+        assert "- first" in md, f"{name}: {md!r}"
+        assert "1. one" in md, f"{name}: {md!r}"
+
+
+def test_no_replacement_or_private_use_characters():
+    """OpenSymbol decoded U+FFFD; Wingdings wrote its bullet as U+F0FC."""
+    for f in RTF:
+        for ch in get_markdown(str(f)):
+            assert ch != "�", f"replacement char in {f.name}"
+            assert not 0xE000 <= ord(ch) <= 0xF8FF, f"private use char in {f.name}"
+
+
+# ── document_metadata.author ──────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name,author", [
+    ("tika_testRTFBoldItalic.rtf", "Michael McCandless"),
+    ("tika_testRTFListLibreOffice.rtf", "Axel Dörfler"),   # \\'f6 in its code page
+    ("conv_libreoffice_heading123.rtf", "Paolo Mottadelli"),  # a real \\upr pair
+    ("tika_testRTF-ms932.rtf", "shinsuke"),
+])
+def test_author_recovered(name, author):
+    chunks, _ = chunk_rtf(str(_pick(name)), mode="semantic")
+    assert chunks[0]["metadata"]["document_metadata"]["author"] == author
+
+
+def test_author_absent_when_no_info_group():
+    chunks, _ = chunk_rtf(str(_pick("tika_testRTFHyperlink.rtf")), mode="semantic")
+    assert chunks[0]["metadata"]["document_metadata"]["author"] is None
+
+
 def test_body_only_file_returns_empty():
     """An RTF with only fonts/objects/metadata (no body) yields [] cleanly."""
     chunks = get_chunks(str(_pick("tika_testRTFEmbeddedLink.rtf")))

@@ -2,7 +2,14 @@
 //! chunked via the Markdown chunker.
 
 pub mod chunkers;
+pub mod encoding;
 pub mod extract;
+pub mod fonts;
+pub mod lists;
+pub mod meta;
+pub mod scan;
+pub mod styles;
+pub mod writer;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
