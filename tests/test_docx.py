@@ -46,7 +46,20 @@ _DOCX_DIR = next(
     None,
 )
 
-ALL_DOCX_FILES = sorted(_DOCX_DIR.glob("*.docx")) if _DOCX_DIR else []
+# Fixtures the engine is CORRECT to reject. They are encrypted/malformed, so a
+# clean raise is the desired behaviour — but every parametrized test below
+# assumes its fixture parses successfully, so leaving them in the glob turns one
+# well-behaved refusal into dozens of spurious failures. They get a dedicated
+# expect-raises test instead (see test_adversarial_fixtures_raise_cleanly).
+ADVERSARIAL_DOCX = {
+    # OLE2 compound file (password-protected), not a zip. py-chunks raises
+    # "Could not find EOCD", which is right.
+    "poi_bug53475-password-is-pass.docx",
+}
+
+_ALL_GLOBBED = sorted(_DOCX_DIR.glob("*.docx")) if _DOCX_DIR else []
+ALL_DOCX_FILES = [f for f in _ALL_GLOBBED if f.name not in ADVERSARIAL_DOCX]
+ADVERSARIAL_DOCX_FILES = [f for f in _ALL_GLOBBED if f.name in ADVERSARIAL_DOCX]
 
 if not ALL_DOCX_FILES:
     pytest.skip(
@@ -702,3 +715,22 @@ class TestDocxStreamingSourceEquivalence:
 def test_missing_file_raises_file_not_found():
     with pytest.raises(FileNotFoundError):
         get_chunks("/nonexistent/path/to/file.docx")
+
+
+@pytest.mark.skipif(
+    not ADVERSARIAL_DOCX_FILES, reason="no adversarial DOCX fixtures present"
+)
+@pytest.mark.parametrize(
+    "docx_file",
+    ADVERSARIAL_DOCX_FILES,
+    ids=[f.name for f in ADVERSARIAL_DOCX_FILES],
+)
+def test_adversarial_fixtures_raise_cleanly(docx_file):
+    """Encrypted/malformed DOCX must fail with a catchable error, never a panic.
+
+    These are excluded from ALL_DOCX_FILES because every other parametrized test
+    assumes its fixture parses. Refusing them is correct behaviour, so it is
+    asserted here explicitly rather than left untested.
+    """
+    with pytest.raises((RuntimeError, ValueError)):
+        get_chunks(str(docx_file))
