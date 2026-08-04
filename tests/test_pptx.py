@@ -28,6 +28,7 @@ from py_chunks import (  # pylint: disable=no-name-in-module
     get_chunks_from_bytes,
     get_chunks_from_fileobj,
     get_chunks_from_upload,
+    get_markdown,
     stream_chunks,
 )
 from py_chunks.chunkers.pptx import chunk_pptx, stream_chunk_pptx  # pylint: disable=no-name-in-module
@@ -41,7 +42,30 @@ class _DummyUpload:
 # ── Fixture discovery ─────────────────────────────────────────────────────────
 
 _PPTX_DIR = Path(__file__).resolve().parents[2] / "test_files" / "pptx"
-ALL_PPTX = sorted(_PPTX_DIR.glob("*.pptx"))
+
+# Decks that genuinely contain no text. Yielding zero chunks is the CORRECT
+# result for these, but every parametrised test below assumes its fixture
+# produces at least one chunk — so leaving them in the main list turns right
+# behaviour into dozens of spurious failures. They get a dedicated test instead
+# (see test_textless_decks_yield_no_chunks).
+#
+# Verified by reading the packages, not by assuming:
+#   poi_tika-2605.pptx — 14 slides, each a single <p:pic>; exactly one <a:t> in
+#     the whole deck and it holds a lone space.
+#   poi_SmartArt.pptx  — one slide holding one SmartArt frame whose diagram data
+#     part has zero <a:r> runs; every <dgm:t> is an empty paragraph. The only
+#     strings in the package are slideLayout/slideMaster boilerplate
+#     ("Click to edit Master title style"), which is template scaffolding and is
+#     correctly excluded. NOTE: this fixture does NOT exercise SmartArt text
+#     extraction — corpus_smartart.pptx does.
+TEXTLESS_PPTX = {
+    "poi_tika-2605.pptx",
+    "poi_SmartArt.pptx",
+}
+
+_ALL_GLOBBED = sorted(_PPTX_DIR.glob("*.pptx"))
+ALL_PPTX = [f for f in _ALL_GLOBBED if f.name not in TEXTLESS_PPTX]
+TEXTLESS_PPTX_FILES = [f for f in _ALL_GLOBBED if f.name in TEXTLESS_PPTX]
 
 if not ALL_PPTX:
     pytest.skip("No PPTX test files found in test_files/pptx/", allow_module_level=True)
@@ -748,3 +772,81 @@ class TestPptxStreamingValidation:
         path = ALL_PPTX[0]
         with pytest.raises((ValueError, NotImplementedError)):
             stream_chunk_pptx(str(path), mode="not_a_real_mode")
+
+
+# ── Decks with no text, and the SmartArt that does have some ──────────────────
+
+class TestTextlessAndSmartArt:
+    """The two cases the parametrised suite above deliberately excludes.
+
+    Zero chunks from a text-free deck is correct behaviour, not a bug — but it
+    has to be *asserted*, or a future regression that empties every deck would
+    look like a passing suite.
+    """
+
+    @pytest.mark.skipif(
+        not TEXTLESS_PPTX_FILES, reason="no text-free PPTX fixtures present"
+    )
+    @pytest.mark.parametrize(
+        "path", TEXTLESS_PPTX_FILES, ids=[f.name for f in TEXTLESS_PPTX_FILES],
+    )
+    def test_textless_decks_yield_no_chunks(self, path):
+        # No exception, no placeholder chunks — the deck really is empty of text.
+        assert get_chunks(str(path)) == []
+
+    @pytest.mark.skipif(
+        not TEXTLESS_PPTX_FILES, reason="no text-free PPTX fixtures present"
+    )
+    @pytest.mark.parametrize(
+        "path", TEXTLESS_PPTX_FILES, ids=[f.name for f in TEXTLESS_PPTX_FILES],
+    )
+    def test_textless_decks_still_render_slide_structure_in_markdown(self, path):
+        # Chunking finds nothing, but the deck is not unreadable: markdown must
+        # still show the slides. This is what distinguishes "empty" from "broken".
+        assert "## Slide 1" in get_markdown(str(path))
+
+    def test_smartart_text_is_extracted_from_the_diagram_part(self):
+        """SmartArt labels live in ppt/diagrams/dataN.xml, not in the slide.
+
+        corpus_smartart.pptx has one text box ("SmartArt below") plus a diagram
+        holding two labels. Before the diagram part was read, only the text box
+        survived and both labels were silently dropped.
+        """
+        path = _PPTX_DIR / "corpus_smartart.pptx"
+        if not path.exists():
+            pytest.skip("corpus_smartart.pptx not present")
+
+        text = "\n".join(c["content"] for c in get_chunks(str(path)))
+        assert "SmartArt below" in text, "the plain text box regressed"
+        assert "Alpha step" in text
+        assert "Beta step" in text
+
+        # ...and the markdown path must agree, not just the chunker.
+        md = get_markdown(str(path))
+        assert "Alpha step" in md
+        assert "Beta step" in md
+
+    def test_smartart_labels_are_not_duplicated(self):
+        """`<dgm:pt type="pres">` nodes mirror the content nodes.
+
+        Including them would emit every label twice, which is why the diagram
+        parser skips them.
+        """
+        path = _PPTX_DIR / "corpus_smartart.pptx"
+        if not path.exists():
+            pytest.skip("corpus_smartart.pptx not present")
+        text = "\n".join(c["content"] for c in get_chunks(str(path)))
+        assert text.count("Alpha step") == 1
+
+    def test_image_alt_text_has_entities_decoded(self):
+        """`descr` is human-authored, so it carries real XML entities.
+
+        Reading the raw attribute bytes leaked "&#xA;" straight into the
+        rendered alt text.
+        """
+        path = _PPTX_DIR / "poi_tika-2605.pptx"
+        if not path.exists():
+            pytest.skip("poi_tika-2605.pptx not present")
+        md = get_markdown(str(path))
+        assert "&#xA;" not in md
+        assert "[Image: A close up of a logo Description generated" in md
