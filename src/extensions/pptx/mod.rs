@@ -1,4 +1,5 @@
 pub mod common;
+pub mod chart;
 pub mod diagram;
 pub mod page_aware;
 pub mod section;

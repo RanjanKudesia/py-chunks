@@ -100,6 +100,8 @@ struct SlideMarkdownContent {
     pub notes: Option<String>,
     /// `r:dm` ids of SmartArt diagrams; their text lives in `ppt/diagrams/`.
     pub diagram_rids: Vec<String>,
+    /// `r:id` ids of charts; their data lives in `ppt/charts/`.
+    pub chart_rids: Vec<String>,
 }
 
 /// Append a slide's SmartArt text as paragraph blocks. Shared by both markdown
@@ -114,6 +116,25 @@ fn append_diagram_blocks(
         if let Ok(bytes) = read_zip_entry(archive, &part) {
             for text in super::diagram::parse_diagram_xml(&bytes) {
                 slide.blocks.push(SlideBlock::paragraph(text));
+            }
+        }
+    }
+}
+
+/// Append a slide's chart data as a real markdown table. The block renderer
+/// already knows how to draw one, so a chart costs no new rendering code.
+fn append_chart_blocks(
+    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
+    slide_name: &str,
+    slide: &mut SlideMarkdownContent,
+) {
+    let parts = super::chart::resolve_chart_parts(archive, slide_name, &slide.chart_rids);
+    for part in parts {
+        if let Ok(bytes) = read_zip_entry(archive, &part) {
+            let rows = super::chart::parse_chart_xml(&bytes);
+            if !rows.is_empty() {
+                slide.blocks.push(SlideBlock::paragraph("Chart".to_string()));
+                slide.blocks.push(SlideBlock::table(rows, true));
             }
         }
     }
@@ -410,6 +431,20 @@ fn parse_slide_for_markdown(
 
                 match local {
                     // SmartArt: the slide only points at the part holding the text.
+                    // `<c:chart r:id=…/>` — the pointer to the chart part.
+                    b"chart" => {
+                        for attr in e.attributes().flatten() {
+                            if attr_local_name(attr.key.as_ref()) == b"id" {
+                                let v = String::from_utf8_lossy(attr.value.as_ref())
+                                    .trim()
+                                    .to_string();
+                                if !v.is_empty() {
+                                    slide.chart_rids.push(v);
+                                }
+                                break;
+                            }
+                        }
+                    }
                     b"relIds" => {
                         for attr in e.attributes().flatten() {
                             if attr_local_name(attr.key.as_ref()) == b"dm" {
@@ -1207,6 +1242,7 @@ pub fn pptx_to_markdown(file_path: &str) -> PyResult<String> {
         let mut slide =
             parse_slide_for_markdown(&xml_bytes, &slide_rels).map_err(PyRuntimeError::new_err)?;
         append_diagram_blocks(&mut archive, slide_name, &mut slide);
+        append_chart_blocks(&mut archive, slide_name, &mut slide);
         slide.notes = extract_notes_text(&mut archive, slide_name);
         slides.push((*slide_num, slide));
     }
@@ -1243,6 +1279,7 @@ pub fn pptx_to_markdown_with_images(py: Python<'_>, file_path: &str) -> PyResult
         let mut slide =
             parse_slide_for_markdown(&xml_bytes, &slide_rels).map_err(PyRuntimeError::new_err)?;
         append_diagram_blocks(&mut archive, slide_name, &mut slide);
+        append_chart_blocks(&mut archive, slide_name, &mut slide);
         slide.notes = extract_notes_text(&mut archive, slide_name);
         slides.push((*slide_num, slide));
         slide_image_rids.insert(*slide_num, image_rids);
