@@ -6,6 +6,7 @@
 //! `parse_docx_indexed_paragraphs` function that replaces the previously
 //! duplicated walkers in `sliding_window.rs` and `sentence.rs`.
 
+use crate::extensions::entities::read_event_folding_entities;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -615,7 +616,10 @@ pub(super) fn parse_rels_xml_images(xml: &str) -> HashMap<String, String> {
     let mut buf = Vec::new();
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        // Entity references arrive as their own event; fold them back into text.
+        let mut spill = String::new();
+        let mut is_entity = false;
+        match read_event_folding_entities!(reader, &mut buf, &mut spill, &mut is_entity) {
             Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
                 let ename = e.name();
                 let ebytes = ename.as_ref();
@@ -702,6 +706,11 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
     let mut blocks: Vec<DocxBlock> = Vec::new();
 
     let mut in_text = false;
+    // One <w:t> can arrive as several events, because quick-xml reports each
+    // entity reference separately. Accumulate the element's text verbatim and
+    // route it onward once, at </w:t> — joining per event would insert spaces
+    // inside words ("AT&amp;T" -> "AT & T").
+    let mut wt_buf = String::new();
     let mut in_paragraph = false;
 
     let mut para_text = String::new();
@@ -739,7 +748,10 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
     let mut table_stack: Vec<TableState> = Vec::new();
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        // Entity references arrive as their own event; fold them back into text.
+        let mut spill = String::new();
+        let mut is_entity = false;
+        match read_event_folding_entities!(reader, &mut buf, &mut spill, &mut is_entity) {
             Ok(Event::Start(e)) => {
                 let name = e.name();
                 if qname_eq(name, b"tbl") {
@@ -936,6 +948,7 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                     }
                 } else if qname_eq(name, b"t") {
                     in_text = true;
+                    wt_buf.clear();
                 }
             }
             Ok(Event::Empty(e)) => {
@@ -1092,6 +1105,24 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                 let name = e.name();
                 if qname_eq(name, b"t") {
                     in_text = false;
+                    let txt = std::mem::take(&mut wt_buf);
+                    if let Some(top) = table_stack.last_mut() {
+                        if top.in_cell {
+                            push_text(&mut top.current_cell, &txt);
+                        }
+                    } else if in_paragraph {
+                        if in_run {
+                            push_text(&mut cur_run_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        } else {
+                            push_text(&mut para_text, &txt);
+                            if in_hyperlink {
+                                push_text(&mut hyperlink_text, &txt);
+                            }
+                        }
+                    }
                 } else if qname_eq(name, b"drawing") {
                     drawing_depth = drawing_depth.saturating_sub(1);
                 } else if qname_eq(name, b"hyperlink") && in_paragraph {
@@ -1316,45 +1347,13 @@ fn parse_document_xml_blocks_streaming<R: Read>(reader_src: R) -> Result<Vec<Doc
                         Ok(v) => v.into_owned(),
                         Err(_) => String::new(),
                     };
-                    if let Some(top) = table_stack.last_mut() {
-                        if top.in_cell {
-                            push_text(&mut top.current_cell, &txt);
-                        }
-                    } else if in_paragraph {
-                        if in_run {
-                            push_text(&mut cur_run_text, &txt);
-                            if in_hyperlink {
-                                push_text(&mut hyperlink_text, &txt);
-                            }
-                        } else {
-                            push_text(&mut para_text, &txt);
-                            if in_hyperlink {
-                                push_text(&mut hyperlink_text, &txt);
-                            }
-                        }
-                    }
+                    wt_buf.push_str(&txt);
                 }
             }
             Ok(Event::CData(t)) => {
                 if in_text {
                     let txt = String::from_utf8_lossy(t.as_ref());
-                    if let Some(top) = table_stack.last_mut() {
-                        if top.in_cell {
-                            push_text(&mut top.current_cell, &txt);
-                        }
-                    } else if in_paragraph {
-                        if in_run {
-                            push_text(&mut cur_run_text, &txt);
-                            if in_hyperlink {
-                                push_text(&mut hyperlink_text, &txt);
-                            }
-                        } else {
-                            push_text(&mut para_text, &txt);
-                            if in_hyperlink {
-                                push_text(&mut hyperlink_text, &txt);
-                            }
-                        }
-                    }
+                    wt_buf.push_str(&txt);
                 }
             }
             Ok(Event::Eof) => break,

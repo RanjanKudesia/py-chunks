@@ -1,6 +1,7 @@
 pub mod csv;
 pub mod doc;
 pub mod docx;
+pub mod entities;
 pub mod eml;
 pub mod json;
 pub mod odf;

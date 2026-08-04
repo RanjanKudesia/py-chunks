@@ -1,3 +1,4 @@
+use crate::extensions::entities::read_event_folding_entities;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Cursor, Read};
@@ -35,7 +36,10 @@ fn parse_numbering_xml(xml: &str) -> HashMap<u32, bool> {
     let mut cur_num_id: Option<u32> = None;
 
     loop {
-        let event = reader.read_event_into(&mut buf);
+        // Entity references arrive as their own event; fold them back into text.
+        let mut spill = String::new();
+        let mut is_entity = false;
+        let event = read_event_folding_entities!(reader, &mut buf, &mut spill, &mut is_entity);
         match event {
             Ok(XmlEvent::Start(ref e)) | Ok(XmlEvent::Empty(ref e)) => {
                 let ename = e.name();
@@ -187,7 +191,10 @@ fn parse_rels_xml(xml: &str) -> (HashMap<String, String>, Vec<String>) {
     let mut buf = Vec::new();
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        // Entity references arrive as their own event; fold them back into text.
+        let mut spill = String::new();
+        let mut is_entity = false;
+        match read_event_folding_entities!(reader, &mut buf, &mut spill, &mut is_entity) {
             Ok(XmlEvent::Empty(ref e)) | Ok(XmlEvent::Start(ref e)) => {
                 let ename = e.name();
                 let ebytes = ename.as_ref();
@@ -248,7 +255,10 @@ fn extract_header_text(xml: &str) -> String {
     let mut in_t = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
+        // Entity references arrive as their own event; fold them back into text.
+        let mut spill = String::new();
+        let mut is_entity = false;
+        match read_event_folding_entities!(reader, &mut buf, &mut spill, &mut is_entity) {
             Ok(XmlEvent::Start(ref e)) => {
                 let ename = e.name();
                 let ebytes = ename.as_ref();
