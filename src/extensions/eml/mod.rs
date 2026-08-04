@@ -1,15 +1,12 @@
-//! MIME email support: `.eml` (single RFC822 message) and `.mbox` (mailbox of
-//! messages). Parsed via `mail-parser`, assembled into markdown, then chunked
-//! through the Markdown chunker — mirroring the `.msg` pipeline.
+//! `.eml` support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::eml`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
 
 pub mod chunkers;
-pub mod extract;
-pub mod mbox;
 
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-
-pub(crate) fn register(m: &pyo3::Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     chunkers::register(m)?;
+    chunkers::register_images(m)?;
     Ok(())
 }

@@ -41,6 +41,17 @@ pub fn chunks_to_pylist(py: Python<'_>, chunks: &[Chunk]) -> PyResult<Vec<PyObje
     chunks.iter().map(|c| chunk_to_pydict(py, c)).collect()
 }
 
+/// Extracted images as the `[(name, bytes)]` list the Python layer expects.
+pub fn images_to_py(
+    py: Python<'_>,
+    images: Vec<(String, Vec<u8>)>,
+) -> Vec<(String, Py<pyo3::types::PyBytes>)> {
+    images
+        .into_iter()
+        .map(|(name, bytes)| (name, pyo3::types::PyBytes::new_bound(py, &bytes).unbind()))
+        .collect()
+}
+
 /// The `{chunks, rust_ms}` envelope every `chunk_*` pyfunction returns.
 pub fn to_result_dict(py: Python<'_>, chunks: &[Chunk], started: Instant) -> PyResult<PyObject> {
     let rust_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -215,6 +226,117 @@ macro_rules! bind_format {
             m.add_function(wrap_pyfunction!($f_slide, m)?)?;
             m.add_function(wrap_pyfunction!($f_md, m)?)?;
             m.add_function(wrap_pyfunction!($f_stream, m)?)?;
+            Ok(())
+        }
+    };
+}
+
+/// The two extra pyfunctions a format with image extraction exposes.
+///
+/// **Must be invoked in the same module as [`bind_format!`]**, which brings the
+/// PyO3 imports and the `__engine` alias into scope. This one adds
+/// `register_images`, which the format's `mod.rs` calls alongside `register`.
+///
+/// `rows_per_chunk` and `max_chunk_chars` are accepted and ignored. They are
+/// part of the Python signature already shipped, so they stay.
+#[macro_export]
+macro_rules! bind_images {
+    (
+        chunk_with_images       = $f_ci:ident,
+        to_markdown_with_images = $f_mi:ident,
+    ) => {
+        #[pyfunction]
+        #[allow(clippy::too_many_arguments)]
+        #[pyo3(signature = (file_path, mode, rows_per_chunk, window_size, overlap, sentences_per_chunk, paragraphs_per_page, max_chunk_chars))]
+        fn $f_ci(
+            py: Python<'_>,
+            file_path: &str,
+            mode: &str,
+            rows_per_chunk: usize,
+            window_size: usize,
+            overlap: usize,
+            sentences_per_chunk: usize,
+            paragraphs_per_page: usize,
+            max_chunk_chars: usize,
+        ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
+            let _ = (rows_per_chunk, max_chunk_chars);
+            let (chunks, images) = __engine::chunk_with_images(
+                file_path,
+                mode,
+                window_size,
+                overlap,
+                sentences_per_chunk,
+                paragraphs_per_page,
+            )
+            .map_err($crate::engine::to_py_err)?;
+            Ok((
+                $crate::engine::chunks_to_pylist(py, &chunks)?,
+                $crate::engine::images_to_py(py, images),
+            ))
+        }
+
+        #[pyfunction]
+        fn $f_mi(
+            py: Python<'_>,
+            file_path: &str,
+        ) -> PyResult<(String, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
+            let (md, images) =
+                __engine::to_markdown_with_images(file_path).map_err($crate::engine::to_py_err)?;
+            Ok((md, $crate::engine::images_to_py(py, images)))
+        }
+
+        pub fn register_images(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add_function(wrap_pyfunction!($f_ci, m)?)?;
+            m.add_function(wrap_pyfunction!($f_mi, m)?)?;
+            Ok(())
+        }
+    };
+
+    // HTML's shipped signature never took the two ignored parameters.
+    (
+        chunk_with_images       = $f_ci:ident,
+        to_markdown_with_images = $f_mi:ident,
+        no_row_args,
+    ) => {
+        #[pyfunction]
+        #[pyo3(signature = (file_path, mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page))]
+        fn $f_ci(
+            py: Python<'_>,
+            file_path: &str,
+            mode: &str,
+            window_size: usize,
+            overlap: usize,
+            sentences_per_chunk: usize,
+            paragraphs_per_page: usize,
+        ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
+            let (chunks, images) = __engine::chunk_with_images(
+                file_path,
+                mode,
+                window_size,
+                overlap,
+                sentences_per_chunk,
+                paragraphs_per_page,
+            )
+            .map_err($crate::engine::to_py_err)?;
+            Ok((
+                $crate::engine::chunks_to_pylist(py, &chunks)?,
+                $crate::engine::images_to_py(py, images),
+            ))
+        }
+
+        #[pyfunction]
+        fn $f_mi(
+            py: Python<'_>,
+            file_path: &str,
+        ) -> PyResult<(String, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
+            let (md, images) =
+                __engine::to_markdown_with_images(file_path).map_err($crate::engine::to_py_err)?;
+            Ok((md, $crate::engine::images_to_py(py, images)))
+        }
+
+        pub fn register_images(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add_function(wrap_pyfunction!($f_ci, m)?)?;
+            m.add_function(wrap_pyfunction!($f_mi, m)?)?;
             Ok(())
         }
     };

@@ -1,14 +1,12 @@
-//! EPUB (.epub) support — OCF/OPF navigation, chunked via the HTML chunker in
-//! spine (reading) order.
+//! `.epub` support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::epub`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
 
 pub mod chunkers;
-pub mod extract;
-pub mod package;
 
-use pyo3::prelude::*;
-use pyo3::types::PyModule;
-
-pub(crate) fn register(m: &pyo3::Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
     chunkers::register(m)?;
+    chunkers::register_images(m)?;
     Ok(())
 }
