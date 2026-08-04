@@ -740,3 +740,33 @@ def test_adversarial_fixtures_raise_cleanly(docx_file):
     """
     with pytest.raises((RuntimeError, ValueError)):
         get_chunks(str(docx_file))
+
+
+# ── A complete sentence is not a "disconnected fragment" (#14) ────────────────
+
+RTL_CJK_DOCX = (_DOCX_DIR / "corpus_rtl_cjk.docx") if _DOCX_DIR else Path("missing")
+
+
+@pytest.mark.skipif(not RTL_CJK_DOCX.exists(), reason="missing corpus_rtl_cjk.docx")
+def test_dense_script_paragraphs_are_not_merged():
+    """Each language paragraph must survive as its own chunk.
+
+    The short-paragraph bucket aggregates stray fragments. A whole sentence in
+    a dense script is short by any length measure — 20 characters of Chinese,
+    60 bytes — so length alone merged five distinct paragraphs into one.
+    """
+    chunks = get_chunks(str(RTL_CJK_DOCX), mode="default")
+    assert len(chunks) == 6, [c["content"][:30] for c in chunks]
+    joined = [c["content"] for c in chunks]
+    assert any("العربية" in c for c in joined)
+    assert any("בעברית" in c for c in joined)
+    assert any("日本語の段落です" in c for c in joined)
+    assert any("这是一个中文段落" in c for c in joined)
+
+
+@pytest.mark.skipif(not RTL_CJK_DOCX.exists(), reason="missing corpus_rtl_cjk.docx")
+def test_a_fragment_without_terminal_punctuation_stays_short():
+    """The trailing mixed line ends mid-thought and must still aggregate."""
+    chunks = get_chunks(str(RTL_CJK_DOCX), mode="default")
+    last = chunks[-1]
+    assert last["content_type"] == "short_disconnected_paragraph", last
