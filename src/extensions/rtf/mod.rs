@@ -1,15 +1,9 @@
-//! Rich Text Format (.rtf) support — spec-correct hand-rolled text extraction,
-//! chunked via the Markdown chunker.
+//! Rich Text Format (.rtf) support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::rtf`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
 
 pub mod chunkers;
-pub mod encoding;
-pub mod extract;
-pub mod fonts;
-pub mod lists;
-pub mod meta;
-pub mod scan;
-pub mod styles;
-pub mod writer;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;

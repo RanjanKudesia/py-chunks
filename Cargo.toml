@@ -11,6 +11,11 @@ crate-type = ["cdylib", "rlib"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+# THE ENGINE. Vendored at crates/rs-chunks so py_chunks builds from a standalone
+# clone (PyPI ships from its own repo — no sibling path deps). Never hand-edit
+# that tree: ../sync_engine.sh overwrites it from rs-chunks. See
+# CONSOLIDATION_PLAN.md.
+rs-chunks = { path = "crates/rs-chunks", default-features = false, features = ["pdf-native"] }
 pyo3 = { version = "0.22" }
 pythonize = "0.22"
 quick-xml = "0.38"
