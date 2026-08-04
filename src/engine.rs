@@ -90,3 +90,132 @@ impl ChunkStreamIterator {
         )
     }
 }
+
+/// Generate the whole pyfunction surface for a format whose engine module
+/// exposes the standard `chunk` / `to_markdown` pair.
+///
+/// Every migrated format's binding is the same eight functions differing only
+/// in name, so writing them out per format is 100 lines of copy-paste per
+/// format — which is how the fork grew in the first place. The defaults
+/// (`3, 1, 3, 15`) are the historical Python ones and are part of the public
+/// API; they are stated once, here.
+#[macro_export]
+macro_rules! bind_format {
+    (
+        engine       = $eng:path,
+        default      = $f_default:ident,
+        section      = $f_section:ident,
+        semantic     = $f_semantic:ident,
+        sentence     = $f_sentence:ident,
+        page_aware   = $f_page:ident,
+        sliding      = $f_slide:ident,
+        to_markdown  = $f_md:ident,
+        stream       = $f_stream:ident,
+    ) => {
+        use pyo3::prelude::*;
+        use pyo3::types::PyModule;
+        use pyo3::wrap_pyfunction;
+
+        use $eng as __engine;
+        use $crate::engine::{run, to_py_err, ChunkStreamIterator};
+
+        fn __run_mode(
+            py: Python<'_>,
+            file_path: &str,
+            mode: &str,
+            window_size: usize,
+            overlap: usize,
+            sentences_per_chunk: usize,
+            paragraphs_per_page: usize,
+        ) -> PyResult<PyObject> {
+            run(py, || {
+                __engine::chunk(
+                    file_path,
+                    mode,
+                    window_size,
+                    overlap,
+                    sentences_per_chunk,
+                    paragraphs_per_page,
+                )
+            })
+        }
+
+        #[pyfunction]
+        fn $f_default(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "default", 3, 1, 3, 15)
+        }
+        #[pyfunction]
+        fn $f_section(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "section", 3, 1, 3, 15)
+        }
+        #[pyfunction]
+        fn $f_semantic(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "semantic", 3, 1, 3, 15)
+        }
+        #[pyfunction]
+        fn $f_sentence(
+            py: Python<'_>,
+            file_path: &str,
+            sentences_per_chunk: usize,
+        ) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "sentence", 3, 1, sentences_per_chunk, 15)
+        }
+        #[pyfunction]
+        fn $f_page(
+            py: Python<'_>,
+            file_path: &str,
+            paragraphs_per_page: usize,
+        ) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "page_aware", 3, 1, 3, paragraphs_per_page)
+        }
+        #[pyfunction]
+        fn $f_slide(
+            py: Python<'_>,
+            file_path: &str,
+            window_size: usize,
+            overlap: usize,
+        ) -> PyResult<PyObject> {
+            __run_mode(py, file_path, "sliding_window", window_size, overlap, 3, 15)
+        }
+
+        #[pyfunction]
+        fn $f_md(file_path: &str) -> PyResult<String> {
+            __engine::to_markdown(file_path).map_err(to_py_err)
+        }
+
+        #[pyfunction]
+        #[pyo3(signature = (file_path, mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page))]
+        fn $f_stream(
+            py: Python<'_>,
+            file_path: &str,
+            mode: &str,
+            window_size: usize,
+            overlap: usize,
+            sentences_per_chunk: usize,
+            paragraphs_per_page: usize,
+        ) -> PyResult<Py<ChunkStreamIterator>> {
+            let chunks = __engine::chunk(
+                file_path,
+                mode,
+                window_size,
+                overlap,
+                sentences_per_chunk,
+                paragraphs_per_page,
+            )
+            .map_err(to_py_err)?;
+            ChunkStreamIterator::build(py, &chunks)
+        }
+
+        pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add_function(wrap_pyfunction!($f_default, m)?)?;
+            m.add_function(wrap_pyfunction!($f_section, m)?)?;
+            m.add_function(wrap_pyfunction!($f_semantic, m)?)?;
+            m.add_function(wrap_pyfunction!($f_sentence, m)?)?;
+            m.add_function(wrap_pyfunction!($f_page, m)?)?;
+            m.add_function(wrap_pyfunction!($f_slide, m)?)?;
+            m.add_function(wrap_pyfunction!($f_md, m)?)?;
+            m.add_function(wrap_pyfunction!($f_stream, m)?)?;
+            Ok(())
+        }
+    };
+}

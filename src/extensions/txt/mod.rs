@@ -1,19 +1,10 @@
-pub mod common;
-pub mod page_aware;
-pub mod section;
-pub mod semantic;
-pub mod sentence;
-pub mod sliding_window;
-pub mod stream_iter;
-pub mod structural;
+//! Plain-text (.txt) support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::txt`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
+
+pub mod chunkers;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
-    structural::register(m)?;
-    semantic::register(m)?;
-    section::register(m)?;
-    sliding_window::register(m)?;
-    sentence::register(m)?;
-    page_aware::register(m)?;
-    stream_iter::register(m)?;
-    Ok(())
+    chunkers::register(m)
 }

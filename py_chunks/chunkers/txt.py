@@ -111,11 +111,15 @@ def stream_chunk_txt(
 def txt_to_markdown(file_path: str) -> str:
     """Return the contents of a plain-text file as a Markdown string.
 
-    Plain text has no inherent formatting, so the file is returned as-is.
+    Plain text has no inherent formatting, so the text is returned as-is — but
+    it is decoded by the engine, not read as UTF-8 here. Reading it here was
+    TECH_DEBT #75: `read_text(encoding="utf-8", errors="replace")` turned every
+    cp1252 byte into U+FFFD and every UTF-16 file into its bytes interleaved
+    with NULs, while `get_chunks` on the same file was correct.
     """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"TXT file not found: {file_path}")
     if path.suffix.lower() != ".txt":
         raise ValueError(f"Expected a .txt file, got: {file_path}")
-    return path.read_text(encoding="utf-8", errors="replace")
+    return _rust.txt_to_markdown(str(path))

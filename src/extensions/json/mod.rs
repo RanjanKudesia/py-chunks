@@ -1,9 +1,9 @@
-//! JSON family support: `.json` (single document), `.jsonl` / `.ndjson`
-//! (line-delimited records). Records are rendered to markdown, then chunked via
-//! the Markdown chunker. No new dependency (serde_json is already used).
+//! JSON / JSONL / NDJSON support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::json`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
 
 pub mod chunkers;
-pub mod extract;
 
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
