@@ -6,3 +6,26 @@ disable=
     duplicate-code,
     too-few-public-methods,
     missing-function-docstring
+
+[DESIGN]
+# These limits are set to what this library's shape actually requires, rather
+# than left at the defaults and then silenced. Every entry point takes the same
+# chunking parameters — mode, window_size, overlap, sentences_per_chunk,
+# paragraphs_per_page, plus the source — and that signature is the documented
+# public API (see chunkengine.dev/docs/api-reference). Splitting it into a
+# config object to satisfy a linter would change the API for no user benefit.
+max-args=11
+max-positional-arguments=11
+# Format dispatch is inherently a wide branch: one arm per extension family,
+# each with an early return. Collapsing them would make the routing harder to
+# read, not easier.
+max-branches=18
+max-returns=17
+max-locals=20
+# __init__.py is the dispatcher plus the full typed public API and its
+# docstrings; it is long by design.
+max-module-lines=1700
+
+[FORMAT]
+max-line-length=100
+

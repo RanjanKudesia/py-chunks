@@ -31,7 +31,8 @@ def _validate_pdf_args(
         raise ValueError(f"Expected a .pdf file, got: {file_path}")
     if mode not in _SUPPORTED_MODES:
         raise ValueError(
-            "mode must be 'default', 'structural', 'section', 'semantic', 'sliding_window', 'sentence', or 'page_aware' for PDF"
+            "mode must be 'default', 'structural', 'section', 'semantic', "
+            "'sliding_window', 'sentence', or 'page_aware' for PDF"
         )
     if mode == "sliding_window" and window_size <= 0:
         raise ValueError("window_size must be greater than 0")

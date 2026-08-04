@@ -5,6 +5,16 @@ that accept paths, bytes, file-like objects, upload objects, and pre-signed
 URLs.
 """
 
+import os
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from os import PathLike, fspath
+from pathlib import Path
+from typing import Any, Literal, overload
+from urllib.parse import urlparse
+from urllib.request import urlopen
+
 from .chunkers.xlsx import (
     chunk_xlsx,
     chunk_xlsx_with_images as _chunk_xlsx_with_images,
@@ -13,7 +23,13 @@ from .chunkers.xlsx import (
     xlsx_to_markdown_with_images as _xlsx_to_markdown_with_images,
 )
 from .chunkers.txt import chunk_txt, stream_chunk_txt, txt_to_markdown as _txt_to_markdown
-from .chunkers.pptx import chunk_pptx, chunk_pptx_with_images as _chunk_pptx_with_images, pptx_to_markdown as _pptx_to_markdown, pptx_to_markdown_with_images as _pptx_to_markdown_with_images, stream_chunk_pptx
+from .chunkers.pptx import (
+    chunk_pptx,
+    chunk_pptx_with_images as _chunk_pptx_with_images,
+    pptx_to_markdown as _pptx_to_markdown,
+    pptx_to_markdown_with_images as _pptx_to_markdown_with_images,
+    stream_chunk_pptx,
+)
 from .chunkers.pdf import (
     chunk_pdf,
     chunk_pdf_with_images as _chunk_pdf_with_images,
@@ -21,7 +37,13 @@ from .chunkers.pdf import (
     pdf_to_markdown_with_images as _pdf_to_markdown_with_images,
     stream_chunk_pdf,
 )
-from .chunkers.ppt import chunk_ppt, chunk_ppt_with_images as _chunk_ppt_with_images, ppt_to_markdown as _ppt_to_markdown, ppt_to_markdown_with_images as _ppt_to_markdown_with_images, stream_chunk_ppt
+from .chunkers.ppt import (
+    chunk_ppt,
+    chunk_ppt_with_images as _chunk_ppt_with_images,
+    ppt_to_markdown as _ppt_to_markdown,
+    ppt_to_markdown_with_images as _ppt_to_markdown_with_images,
+    stream_chunk_ppt,
+)
 from .chunkers.md import chunk_md, md_to_markdown as _md_to_markdown, stream_chunk_md
 from .chunkers.html import (
     chunk_html,
@@ -73,17 +95,20 @@ from .chunkers.ipynb import (
     ipynb_to_markdown_with_images as _ipynb_to_markdown_with_images,
     stream_chunk_ipynb,
 )
-from .chunkers.doc import chunk_doc, chunk_doc_with_images as _chunk_doc_with_images, doc_to_markdown as _doc_to_markdown, doc_to_markdown_with_images as _doc_to_markdown_with_images, stream_chunk_doc
-from .chunkers.docx import chunk_docx, chunk_docx_with_images as _chunk_docx_with_images, docx_to_markdown as _docx_to_markdown, docx_to_markdown_with_images as _docx_to_markdown_with_images, stream_chunk_docx
-import os
-import sys
-import tempfile
-from dataclasses import dataclass, field
-from os import PathLike, fspath
-from pathlib import Path
-from typing import Any, Literal, overload
-from urllib.parse import urlparse
-from urllib.request import urlopen
+from .chunkers.doc import (
+    chunk_doc,
+    chunk_doc_with_images as _chunk_doc_with_images,
+    doc_to_markdown as _doc_to_markdown,
+    doc_to_markdown_with_images as _doc_to_markdown_with_images,
+    stream_chunk_doc,
+)
+from .chunkers.docx import (
+    chunk_docx,
+    chunk_docx_with_images as _chunk_docx_with_images,
+    docx_to_markdown as _docx_to_markdown,
+    docx_to_markdown_with_images as _docx_to_markdown_with_images,
+    stream_chunk_docx,
+)
 
 _pkg_dir = Path(__file__).parent
 
@@ -441,40 +466,39 @@ def get_chunks_from_path(
                 paragraphs_per_page=paragraphs_per_page,
             )
             return ChunksResult(chunks=chunk_list, images=images)
-        else:
-            # Unsupported format — silent fallback, no images
-            if os.path.splitext(file_path)[1].lower() in _SPREADSHEET_EXTS:
-                chunks, _ = chunk_xlsx(
-                    file_path,
-                    mode="row" if mode == "default" else mode,
-                    rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
-                    window_size=window_size,
-                    overlap=overlap,
-                )
-                return ChunksResult(chunks=chunks, images={})
-            if ext in _DELIMITED_EXTS:
-                csv_mode = "row" if mode == "default" else mode
-                rows_per_chunk = (
-                    paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
-                        sentences_per_chunk)
-                )
-                chunks, _ = chunk_csv(
-                    file_path,
-                    mode=csv_mode,
-                    rows_per_chunk=rows_per_chunk,
-                    window_size=window_size,
-                    overlap=overlap,
-                    include_headers=True,
-                    delimiter=_delimiter_for(ext, delimiter),
-                    encoding=encoding,
-                    skip_empty_rows=True,
-                )
-                return ChunksResult(chunks=chunks, images={})
-            chunks, _ = _run_chunker(
-                chunker, file_path, mode, window_size,
-                overlap, sentences_per_chunk, paragraphs_per_page,
+        # Unsupported format — silent fallback, no images
+        if os.path.splitext(file_path)[1].lower() in _SPREADSHEET_EXTS:
+            chunks, _ = chunk_xlsx(
+                file_path,
+                mode="row" if mode == "default" else mode,
+                rows_per_chunk=_xlsx_rows_per_chunk(sentences_per_chunk),
+                window_size=window_size,
+                overlap=overlap,
             )
             return ChunksResult(chunks=chunks, images={})
+        if ext in _DELIMITED_EXTS:
+            csv_mode = "row" if mode == "default" else mode
+            rows_per_chunk = (
+                paragraphs_per_page if csv_mode == "page_aware" else _csv_rows_per_chunk(
+                    sentences_per_chunk)
+            )
+            chunks, _ = chunk_csv(
+                file_path,
+                mode=csv_mode,
+                rows_per_chunk=rows_per_chunk,
+                window_size=window_size,
+                overlap=overlap,
+                include_headers=True,
+                delimiter=_delimiter_for(ext, delimiter),
+                encoding=encoding,
+                skip_empty_rows=True,
+            )
+            return ChunksResult(chunks=chunks, images={})
+        chunks, _ = _run_chunker(
+            chunker, file_path, mode, window_size,
+            overlap, sentences_per_chunk, paragraphs_per_page,
+        )
+        return ChunksResult(chunks=chunks, images={})
 
     if os.path.splitext(file_path)[1].lower() in _SPREADSHEET_EXTS:
         chunks, _ = chunk_xlsx(
@@ -1339,9 +1363,11 @@ def stream_chunks(
 
     Raises:
         FileNotFoundError: If the file path does not exist.
-        ValueError: If source type is invalid, filename is missing when required, or mode is unavailable.
+        ValueError: If source type is invalid, filename is missing when
+            required, or mode is unavailable.
         TypeError: If source type is unsupported.
-        NotImplementedError: If the requested mode/format combination is not yet implemented for streaming.
+        NotImplementedError: If the requested mode/format combination is not
+            yet implemented for streaming.
     """
     if isinstance(source, (str, PathLike)):
         source_path = fspath(source)

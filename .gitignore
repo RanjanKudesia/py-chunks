@@ -27,3 +27,8 @@ CLAUDE.md
 # Canonical tracker: ../TECH_DEBT.md (workspace root)
 /TECH_DEBT.md
 /CLAUDE.md
+
+# Build output from `maturin develop` — 20 MB, rebuilt on every change, and
+# PyPI ships wheels rather than this. Tracking it dirtied the tree after every
+# build and added 20 MB to history per commit that touched it. (#67)
+py_chunks/*.so

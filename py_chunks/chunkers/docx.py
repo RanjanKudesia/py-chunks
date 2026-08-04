@@ -34,7 +34,8 @@ def _validate_docx_args(
             f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
     if mode not in _DOCX_MODES:
         raise ValueError(
-            "mode must be 'default', 'structural', 'section', 'semantic', 'sliding_window', 'sentence', or 'page_aware'"
+            "mode must be 'default', 'structural', 'section', 'semantic', "
+            "'sliding_window', 'sentence', or 'page_aware'"
         )
 
     normalized_mode = "structural" if mode == "default" else mode
@@ -162,7 +163,10 @@ def stream_chunk_docx(
         raise ValueError(
             f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
 
-    if mode not in {"default", "structural", "semantic", "section", "sliding_window", "sentence", "page_aware"}:
+    if mode not in {
+        "default", "structural", "semantic", "section",
+        "sliding_window", "sentence", "page_aware",
+    }:
         raise NotImplementedError(f"Streaming for {mode} mode coming soon")
 
     if mode == "semantic":

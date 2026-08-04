@@ -5,7 +5,10 @@ from pathlib import Path
 
 from py_chunks import _rust
 
-_MD_MODES = {"default", "structural", "semantic", "section", "sliding_window", "sentence", "page_aware"}
+_MD_MODES = {
+    "default", "structural", "semantic", "section",
+    "sliding_window", "sentence", "page_aware",
+}
 _MD_STREAMING_MODES = _MD_MODES  # all modes support streaming
 
 
