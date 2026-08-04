@@ -1,5 +1,6 @@
 pub mod common;
 pub mod images;
+pub mod repair;
 pub mod page_aware;
 pub mod row_document;
 pub mod semantic;

@@ -120,6 +120,28 @@ fn repair_ods_missing_mimetype(file_path: &str) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
+/// Write a repaired OOXML workbook to a temp file, mirroring
+/// [`repair_ods_missing_mimetype`]. Returns `None` when no repair was needed.
+///
+/// The rs-chunks build opens workbooks from bytes and needs no temp file; this
+/// binding opens from a path, so the repaired package has to live somewhere on
+/// disk for calamine to open it.
+fn repair_ooxml_workbook_file(file_path: &str) -> Option<std::path::PathBuf> {
+    let bytes = std::fs::read(file_path).ok()?;
+    let repaired = super::repair::repair_ooxml_workbook_bytes(&bytes)?;
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "pychunks_xlsx_repair_{}_{}.xlsx",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::write(&path, &repaired).ok()?;
+    Some(path)
+}
+
 pub fn open_spreadsheet(
     file_path: &str,
 ) -> Result<calamine::Sheets<std::io::BufReader<File>>, String> {
@@ -146,6 +168,15 @@ pub fn open_spreadsheet(
             } else {
                 open_workbook_auto(&path).map_err(|e| format!("Failed to open workbook: {e}"))
             }
+        } else if let Some(tmp) = repair_ooxml_workbook_file(&path) {
+            // An XLM macro sheet or a <sheet> with an empty r:id makes calamine
+            // reject the whole workbook at open time, before any sheet is read,
+            // so the per-sheet isolation elsewhere never gets a chance. Drop
+            // those entries from the sheet list and the rest loads. (#21)
+            let wb = open_workbook_auto(&tmp).map_err(|e| format!("Failed to open workbook: {e}"));
+            // Same trick as the ODS repair: the handle keeps the inode alive.
+            let _ = std::fs::remove_file(&tmp);
+            wb
         } else {
             open_workbook_auto(&path).map_err(|e| format!("Failed to open workbook: {e}"))
         }
