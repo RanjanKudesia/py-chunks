@@ -256,16 +256,22 @@ def test_invalid_inputs(tmp_path: Path):
         chunk_pdf(str(SAMPLE_PDF), mode="bad-mode")
 
 
-def test_scanned_pdf_handled_gracefully():
-    # With OCR disabled, a scanned/image-only PDF yields (mostly empty) chunks
-    # rather than raising an OCR-hint error — no crash.
+def test_scanned_pdf_raises_instead_of_emitting_empty_code_blocks():
+    """A text-less PDF must fail loudly, not return 100 chunks of nothing.
+
+    This asserted the opposite — that a scanned PDF "yields (mostly empty)
+    chunks ... no crash". What it actually yielded was one ```text fence per
+    page, typed `code_block`: 100 chunks of pure noise from a 100-page file
+    (defect #56). It also contradicted the published error-handling docs, which
+    say a text-less PDF raises. The engine now matches the docs.
+    """
     if not SCANNED_PDF.exists():
         pytest.skip("Missing test_files/large-doc.pdf")
 
-    chunks, _ = chunk_pdf(str(SCANNED_PDF), mode="default")
-    assert isinstance(chunks, list)
-    streamed = list(stream_chunk_pdf(str(SCANNED_PDF), mode="default"))
-    assert isinstance(streamed, list)
+    with pytest.raises(RuntimeError, match="no extractable text"):
+        chunk_pdf(str(SCANNED_PDF), mode="default")
+    with pytest.raises(RuntimeError, match="no extractable text"):
+        list(stream_chunk_pdf(str(SCANNED_PDF), mode="default"))
 
 
 @pytest.mark.parametrize("mode", MODES)

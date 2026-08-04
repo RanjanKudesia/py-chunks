@@ -89,6 +89,9 @@ fn run_mode(
     ensure_pdf(file_path)?;
     let start = Instant::now();
     let conv = backend_to_markdown(file_path, false).map_err(PyRuntimeError::new_err)?;
+    if conv.markdown.trim().is_empty() {
+        return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
+    }
     let mut records = chunks_for_mode(
         conv.markdown.as_bytes(),
         mode,
@@ -168,12 +171,25 @@ fn pdf_to_markdown_with_images(
     Ok((markdown, images_py))
 }
 
+/// A text-less PDF used to fall through to the Markdown chunker and surface as
+/// "Markdown file is empty after decoding" — the wrong format name and nothing
+/// the caller can act on. Say what actually happened. (#56)
+fn empty_pdf_error(total_pages: usize) -> String {
+    format!(
+        "PDF contains no extractable text ({total_pages} page(s) scanned or image-only). \
+         OCR is not enabled, and page-image rendering is not implemented, so there is nothing to return."
+    )
+}
+
 /// Internal: markdown + (name, bytes) images.
 fn pdf_to_markdown_impl(
     file_path: &str,
     embed_images: bool,
 ) -> PyResult<(String, Vec<(String, Vec<u8>)>)> {
     let conv = backend_to_markdown(file_path, embed_images).map_err(PyIOError::new_err)?;
+    if conv.markdown.trim().is_empty() {
+        return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
+    }
     let images = conv.images.into_iter().map(|i| (i.name, i.bytes)).collect();
     Ok((conv.markdown, images))
 }
@@ -197,6 +213,9 @@ fn chunk_pdf_with_images(
     let normalized_mode = if mode == "default" { "default" } else { mode };
 
     let conv = backend_to_markdown(file_path, true).map_err(PyRuntimeError::new_err)?;
+    if conv.markdown.trim().is_empty() {
+        return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
+    }
     let images = conv.images;
     let mut records = chunks_for_mode(
         conv.markdown.as_bytes(),
@@ -263,6 +282,9 @@ fn stream_pdf_chunks(
 ) -> PyResult<Py<PdfStreamIterator>> {
     ensure_pdf(file_path)?;
     let conv = backend_to_markdown(file_path, false).map_err(PyRuntimeError::new_err)?;
+    if conv.markdown.trim().is_empty() {
+        return Err(PyRuntimeError::new_err(empty_pdf_error(conv.total_pages)));
+    }
     let mut records = chunks_for_mode(
         conv.markdown.as_bytes(),
         mode,
