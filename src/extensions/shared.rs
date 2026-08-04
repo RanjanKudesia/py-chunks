@@ -238,36 +238,6 @@ pub fn split_block_on_lines(content: &str, max_chars: usize, repeat_prefix: usiz
     parts
 }
 
-pub fn split_at_sentences(text: &str, max_chars: usize) -> Vec<String> {
-    if text.len() <= max_chars {
-        return vec![text.trim().to_string()];
-    }
-    let mut out = Vec::new();
-    let mut current = String::new();
-    for sentence in split_sentences(text) {
-        let candidate = if current.is_empty() {
-            sentence.clone()
-        } else {
-            format!("{} {}", current, sentence)
-        };
-        if candidate.len() <= max_chars {
-            current = candidate;
-        } else {
-            if !current.is_empty() {
-                out.push(current.trim().to_string());
-            }
-            current = sentence;
-        }
-    }
-    if !current.trim().is_empty() {
-        out.push(current.trim().to_string());
-    }
-    if out.is_empty() {
-        vec![text.trim().to_string()]
-    } else {
-        out.into_iter().filter(|c| !c.is_empty()).collect()
-    }
-}
 
 #[cfg(test)]
 mod tests {

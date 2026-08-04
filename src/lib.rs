@@ -1,4 +1,5 @@
 mod engine;
+mod engine_per_mode;
 mod extensions;
 
 use pyo3::prelude::*;

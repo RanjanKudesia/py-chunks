@@ -11,7 +11,6 @@ pub mod msg;
 pub mod epub;
 pub mod ipynb;
 pub mod rtf;
-pub mod odraw;
 pub mod pdf;
 pub mod ppt;
 pub mod pptx;
