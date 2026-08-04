@@ -32,7 +32,13 @@ from .chunkers.html import (
 )
 from .chunkers.csv import chunk_csv, csv_to_markdown as _csv_to_markdown, stream_chunk_csv
 from .chunkers.tsv import chunk_tsv, tsv_to_markdown as _tsv_to_markdown, stream_chunk_tsv
-from .chunkers.msg import chunk_msg, msg_to_markdown as _msg_to_markdown, stream_chunk_msg
+from .chunkers.msg import (
+    chunk_msg,
+    chunk_msg_with_images as _chunk_msg_with_images,
+    msg_to_markdown as _msg_to_markdown,
+    msg_to_markdown_with_images as _msg_to_markdown_with_images,
+    stream_chunk_msg,
+)
 from .chunkers.eml import (
     chunk_eml,
     chunk_eml_with_images as _chunk_eml_with_images,
@@ -206,6 +212,7 @@ _MD_IMAGE_DISPATCH: dict[str, Any] = {
     ".ipynb": _ipynb_to_markdown_with_images,
     ".eml":  _eml_to_markdown_with_images,
     ".mbox": _eml_to_markdown_with_images,
+    ".msg":  _msg_to_markdown_with_images,
     ".odt":  _odf_to_markdown_with_images,
     ".odp":  _odf_to_markdown_with_images,
 }
@@ -235,6 +242,7 @@ _CHUNKS_IMAGE_DISPATCH: dict[str, Any] = {
     ".ipynb": _chunk_ipynb_with_images,
     ".eml":  _chunk_eml_with_images,
     ".mbox": _chunk_eml_with_images,
+    ".msg":  _chunk_msg_with_images,
     ".odt":  _chunk_odf_with_images,
     ".odp":  _chunk_odf_with_images,
 }

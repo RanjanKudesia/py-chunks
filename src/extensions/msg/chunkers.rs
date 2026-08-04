@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyModule};
 use pyo3::wrap_pyfunction;
 use pythonize::pythonize;
 
@@ -146,6 +146,80 @@ fn msg_to_markdown(file_path: &str) -> PyResult<String> {
     Ok(document_to_markdown(&doc))
 }
 
+#[pyfunction]
+fn msg_to_markdown_with_images(
+    py: Python<'_>,
+    file_path: &str,
+) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
+    ensure_msg(file_path)?;
+    let doc = extract_document(file_path).map_err(PyRuntimeError::new_err)?;
+    let markdown = document_to_markdown(&doc);
+    let images = doc
+        .images
+        .iter()
+        .map(|(name, bytes)| (name.clone(), PyBytes::new_bound(py, bytes).unbind()))
+        .collect();
+    Ok((markdown, images))
+}
+
+/// `list_images=True` for `.msg`, mirroring the `.eml` entry point it was
+/// missing. tika_test-outlook2003.msg carries 11 JPEG attachments and returned
+/// none of them. (#48)
+#[pyfunction]
+#[pyo3(signature = (file_path, mode, rows_per_chunk=1, window_size=3, overlap=1, sentences_per_chunk=3, paragraphs_per_page=15, max_chunk_chars=2000))]
+#[allow(clippy::too_many_arguments)]
+fn chunk_msg_with_images(
+    py: Python<'_>,
+    file_path: &str,
+    mode: &str,
+    rows_per_chunk: usize,
+    window_size: usize,
+    overlap: usize,
+    sentences_per_chunk: usize,
+    paragraphs_per_page: usize,
+    max_chunk_chars: usize,
+) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
+    ensure_msg(file_path)?;
+    let _ = (rows_per_chunk, max_chunk_chars);
+    let doc = extract_document(file_path).map_err(PyRuntimeError::new_err)?;
+    let markdown = document_to_markdown(&doc);
+    let mut records = chunks_for_mode(
+        markdown.as_bytes(),
+        mode,
+        window_size,
+        overlap,
+        sentences_per_chunk,
+        paragraphs_per_page,
+    )
+    .map_err(PyRuntimeError::new_err)?;
+    inject_msg_metadata(&mut records, &doc);
+
+    // Image chunks first, then text chunks — matching the other formats.
+    let mut chunk_list: Vec<PyObject> = doc
+        .images
+        .iter()
+        .map(|(name, _)| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("content", name)?;
+            dict.set_item("content_type", "image")?;
+            let meta = PyDict::new_bound(py);
+            meta.set_item("image_name", name)?;
+            dict.set_item("metadata", meta)?;
+            Ok(dict.into_any().unbind())
+        })
+        .collect::<PyResult<_>>()?;
+    for rec in &records {
+        chunk_list.push(record_to_pydict(py, rec)?);
+    }
+
+    let images = doc
+        .images
+        .iter()
+        .map(|(name, bytes)| (name.clone(), PyBytes::new_bound(py, bytes).unbind()))
+        .collect();
+    Ok((chunk_list, images))
+}
+
 #[pyclass]
 pub struct MsgStreamIterator {
     chunks: std::vec::IntoIter<PyObject>,
@@ -205,6 +279,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_msg_page_aware, m)?)?;
     m.add_function(wrap_pyfunction!(chunk_msg_sliding_window, m)?)?;
     m.add_function(wrap_pyfunction!(msg_to_markdown, m)?)?;
+    m.add_function(wrap_pyfunction!(msg_to_markdown_with_images, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_msg_with_images, m)?)?;
     m.add_function(wrap_pyfunction!(stream_msg_chunks, m)?)?;
     Ok(())
 }

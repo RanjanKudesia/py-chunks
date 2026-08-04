@@ -72,3 +72,37 @@ def msg_to_markdown(file_path: str) -> str:
     if path.suffix.lower() != ".msg":
         raise ValueError(f"Expected a .msg file, got: {file_path}")
     return _rust.msg_to_markdown(str(path))
+
+
+def chunk_msg_with_images(
+    file_path: str,
+    mode: str = "default",
+    window_size: int = 3,
+    overlap: int = 1,
+    sentences_per_chunk: int = 3,
+    paragraphs_per_page: int = 15,
+) -> tuple[list[dict], dict[str, bytes]]:
+    """Chunk a .msg and extract its image attachments as dedicated chunks.
+
+    Mirrors ``chunk_eml_with_images``. ``list_images=True`` used to be a silent
+    no-op for ``.msg`` even when the message carried real image attachments.
+    """
+    path = Path(file_path)
+    normalized = "default" if mode == "default" else mode
+    _validate(file_path, path, normalized)
+    chunk_list, image_list = _rust.chunk_msg_with_images(
+        str(path), normalized, 1, window_size, overlap,
+        sentences_per_chunk, paragraphs_per_page, 2000,
+    )
+    return chunk_list, dict(image_list)
+
+
+def msg_to_markdown_with_images(file_path: str) -> tuple[str, dict[str, bytes]]:
+    """Convert a .msg to Markdown and extract its image attachments."""
+    path = Path(file_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"MSG file not found: {file_path}")
+    if path.suffix.lower() != ".msg":
+        raise ValueError(f"Expected a .msg file, got: {file_path}")
+    md, image_list = _rust.msg_to_markdown_with_images(str(path))
+    return md, dict(image_list)
