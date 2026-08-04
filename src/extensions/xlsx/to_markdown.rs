@@ -69,9 +69,21 @@ pub fn xlsx_to_markdown(file_path: &str) -> PyResult<String> {
     let sheet_names = workbook.sheet_names().to_vec();
     let mut parts: Vec<String> = Vec::new();
 
+    let mut readable_sheets = 0usize;
+    let mut first_sheet_error: Option<String> = None;
     for sheet_name in &sheet_names {
-        let range = super::common::read_worksheet_range(&mut workbook, sheet_name)
-            .map_err(PyRuntimeError::new_err)?;
+        // A sheet calamine cannot read (chart sheets, XLM macro sheets) must not
+        // take the whole workbook down with it — skip it and keep going.
+        let range = match super::common::read_worksheet_range(&mut workbook, sheet_name) {
+            Ok(range) => {
+                readable_sheets += 1;
+                range
+            }
+            Err(e) => {
+                first_sheet_error.get_or_insert(e);
+                continue;
+            }
+        };
 
         let raw_rows: Vec<&[Data]> = range.rows().collect();
         if raw_rows.is_empty() || raw_rows.iter().all(|r| row_is_empty_public(r)) {
@@ -109,6 +121,14 @@ pub fn xlsx_to_markdown(file_path: &str) -> PyResult<String> {
         }
     }
 
+    // Every selected sheet failed to read: this is not an empty workbook,
+    // it is an unreadable one — surface the first failure rather than
+    // returning success with no chunks.
+    if readable_sheets == 0 {
+        if let Some(e) = first_sheet_error {
+            return Err(PyRuntimeError::new_err(e));
+        }
+    }
     Ok(parts.join("\n\n---\n\n"))
 }
 
@@ -142,9 +162,21 @@ pub fn xlsx_to_markdown_with_images(
 
     let mut parts: Vec<String> = Vec::new();
 
+    let mut readable_sheets = 0usize;
+    let mut first_sheet_error: Option<String> = None;
     for (sheet_idx, sheet_name) in sheet_names.iter().enumerate() {
-        let range = super::common::read_worksheet_range(&mut workbook, sheet_name)
-            .map_err(PyRuntimeError::new_err)?;
+        // A sheet calamine cannot read (chart sheets, XLM macro sheets) must not
+        // take the whole workbook down with it — skip it and keep going.
+        let range = match super::common::read_worksheet_range(&mut workbook, sheet_name) {
+            Ok(range) => {
+                readable_sheets += 1;
+                range
+            }
+            Err(e) => {
+                first_sheet_error.get_or_insert(e);
+                continue;
+            }
+        };
 
         let sheet_images = sheet_image_map.get(&sheet_idx);
 
@@ -203,6 +235,14 @@ pub fn xlsx_to_markdown_with_images(
         parts.push(section);
     }
 
+    // Every selected sheet failed to read: this is not an empty workbook,
+    // it is an unreadable one — surface the first failure rather than
+    // returning success with no chunks.
+    if readable_sheets == 0 {
+        if let Some(e) = first_sheet_error {
+            return Err(PyRuntimeError::new_err(e));
+        }
+    }
     let markdown = parts.join("\n\n---\n\n");
     let image_out_py: Vec<(String, Py<PyBytes>)> = image_out
         .into_iter()
