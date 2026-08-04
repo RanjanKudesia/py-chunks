@@ -16,5 +16,6 @@ pub mod pdf;
 pub mod ppt;
 pub mod pptx;
 pub mod shared;
+pub mod text_encoding;
 pub mod txt;
 pub mod xlsx;

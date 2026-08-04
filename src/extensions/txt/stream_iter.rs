@@ -446,16 +446,12 @@ pub fn stream_txt_chunks(
 
     let backend = match mode {
         "default" | "structural" => {
-            let text = std::str::from_utf8(&bytes)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).to_string());
+            let text = crate::extensions::text_encoding::decode_text(&bytes).0;
             let blocks = parse_txt_blocks(&text);
             TxtStreamBackend::Structural(StructuralState::new(blocks))
         }
         "semantic" => {
-            let text = std::str::from_utf8(&bytes)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| String::from_utf8_lossy(&bytes).to_string());
+            let text = crate::extensions::text_encoding::decode_text(&bytes).0;
             let blocks = parse_txt_blocks(&text);
             TxtStreamBackend::Semantic(SemanticState::new(blocks))
         }
