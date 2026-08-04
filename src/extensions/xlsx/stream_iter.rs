@@ -81,7 +81,7 @@ fn parse_sheets_for_streaming(
     file_path: &str,
     sheet_names: Vec<String>,
     skip_empty_rows: bool,
-) -> Result<Vec<SheetData>, String> {
+) -> Result<(Vec<SheetData>, Vec<String>), String> {
     let mut workbook =
         super::common::open_spreadsheet(file_path)?;
 
@@ -100,6 +100,9 @@ fn parse_sheets_for_streaming(
     let mut result = Vec::new();
     let mut readable_sheets = 0usize;
     let mut first_sheet_error: Option<String> = None;
+    // Streaming must report the same skipped sheets the batch path does, or the
+    // two disagree about the same workbook. (#66)
+    let mut skipped_sheets: Vec<String> = Vec::new();
     for sheet_name in selected_sheets {
         let sheet_index = workbook_sheet_names
             .iter()
@@ -115,6 +118,7 @@ fn parse_sheets_for_streaming(
             }
             Err(e) => {
                 first_sheet_error.get_or_insert(e);
+                skipped_sheets.push(sheet_name.clone());
                 continue;
             }
         };
@@ -177,13 +181,14 @@ fn parse_sheets_for_streaming(
             return Err(e);
         }
     }
-    Ok(result)
+    Ok((result, skipped_sheets))
 }
 
 // ── Row state machine ─────────────────────────────────────────────────────────
 
 struct RowStreamState {
     sheets: Vec<SheetData>,
+    skipped_sheets: Vec<String>,
     sheet_idx: usize,
     row_cursor: usize,
     rows_per_chunk: usize,
@@ -254,6 +259,7 @@ impl RowStreamState {
                     "rows_per_chunk": rows_per_chunk,
                     "actual_row_count": actual_row_count,
                     "chunk_index": chunk_index,
+                    "skipped_sheets": self.skipped_sheets.clone(),
                 }),
             });
         }
@@ -264,6 +270,7 @@ impl RowStreamState {
 
 struct SlidingWindowStreamState {
     sheets: Vec<SheetData>,
+    skipped_sheets: Vec<String>,
     sheet_idx: usize,
     window_start: usize,
     window_index: usize, // resets per sheet (mirrors build_sliding_window_chunks)
@@ -344,6 +351,7 @@ impl SlidingWindowStreamState {
                     "header_row": headers,
                     "col_count": col_count,
                     "chunk_index": chunk_index,
+                    "skipped_sheets": self.skipped_sheets.clone(),
                 }),
             });
         }
@@ -444,8 +452,10 @@ pub fn stream_xlsx_chunks(
             let sheets =
                 parse_sheets_for_streaming(file_path, sheet_names, skip_empty_rows)
                     .map_err(map_build_error)?;
+            let (sheets, skipped_sheets) = sheets;
             XlsxStreamBackend::Row(RowStreamState {
                 sheets,
+                skipped_sheets,
                 sheet_idx: 0,
                 row_cursor: 0,
                 rows_per_chunk,
@@ -463,8 +473,10 @@ pub fn stream_xlsx_chunks(
             let sheets =
                 parse_sheets_for_streaming(file_path, sheet_names, skip_empty_rows)
                     .map_err(map_build_error)?;
+            let (sheets, skipped_sheets) = sheets;
             XlsxStreamBackend::SlidingWindow(SlidingWindowStreamState {
                 sheets,
+                skipped_sheets,
                 sheet_idx: 0,
                 window_start: 0,
                 window_index: 0,

@@ -219,6 +219,7 @@ pub fn build_page_aware_chunks(
 
     let mut readable_sheets = 0usize;
     let mut first_sheet_error: Option<String> = None;
+    let mut skipped_sheets: Vec<String> = Vec::new();
     for sheet_name in selected_sheets {
         let sheet_index = workbook_sheet_names
             .iter()
@@ -234,6 +235,7 @@ pub fn build_page_aware_chunks(
             }
             Err(e) => {
                 first_sheet_error.get_or_insert(e);
+                skipped_sheets.push(sheet_name.clone());
                 continue;
             }
         };
@@ -401,6 +403,7 @@ pub fn build_page_aware_chunks(
             return Err(e);
         }
     }
+    super::common::stamp_skipped_sheets(&mut chunks, &skipped_sheets);
     Ok(chunks)
 }
 
