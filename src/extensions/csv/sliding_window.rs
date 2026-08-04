@@ -48,7 +48,7 @@ fn parse_csv_to_rows(
     delimiter: Option<u8>,
     encoding: &str,
     skip_empty_rows: bool,
-) -> Result<(Vec<String>, Vec<Vec<String>>, u8), String> {
+) -> Result<(Vec<String>, Vec<Vec<String>>, u8, bool), String> {
     let delimiter = delimiter_byte(delimiter, file_path, encoding)?;
     let text = read_to_utf8(file_path, encoding)?;
     let mut reader = ReaderBuilder::new()
@@ -62,7 +62,7 @@ fn parse_csv_to_rows(
     let header_record = match records.next() {
         Some(Ok(record)) => record,
         Some(Err(err)) => return Err(format!("Failed to read CSV header: {err}")),
-        None => return Ok((Vec::new(), Vec::new(), delimiter)),
+        None => return Ok((Vec::new(), Vec::new(), delimiter, false)),
     };
 
     let mut headers: Vec<String> = header_record.iter().map(|value| value.to_string()).collect();
@@ -79,6 +79,16 @@ fn parse_csv_to_rows(
         data_rows.push(row);
     }
 
+    // See chunker::first_row_is_header — CSV cannot say whether row 1 is a
+    // header, and assuming it always is deletes the first row of every
+    // headerless file. (#26)
+    let has_header = super::chunker::first_row_is_header(&headers, &data_rows);
+    if !has_header {
+        max_width = max_width.max(headers.len());
+        data_rows.insert(0, std::mem::take(&mut headers));
+        headers = super::chunker::synthetic_headers(max_width);
+    }
+
     headers = normalize_headers(headers, max_width);
     for row in &mut data_rows {
         if row.len() < max_width {
@@ -86,7 +96,7 @@ fn parse_csv_to_rows(
         }
     }
 
-    Ok((headers, data_rows, delimiter))
+    Ok((headers, data_rows, delimiter, has_header))
 }
 
 fn build_chunk_content(headers: &[String], rows: &[Vec<String>], include_headers: bool) -> String {
@@ -122,7 +132,7 @@ pub fn build_sliding_window_chunks(
         return Err("overlap must be less than window_size".to_string());
     }
 
-    let (headers, data_rows, delimiter) =
+    let (headers, data_rows, delimiter, has_header) =
         parse_csv_to_rows(file_path, delimiter, encoding, skip_empty_rows)?;
 
     let mut chunks = Vec::new();
@@ -147,6 +157,7 @@ pub fn build_sliding_window_chunks(
                 "row_end": row_end,
                 "actual_row_count": window.len(),
                 "header_row": headers,
+                "has_header": has_header,
                 "col_count": headers.len(),
                 "delimiter_detected": delimiter_str(delimiter),
                 "encoding": encoding.to_ascii_lowercase(),

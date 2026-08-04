@@ -1,3 +1,4 @@
+use super::chunker::{first_row_is_header, synthetic_headers};
 use csv::{ReaderBuilder, Trim};
 use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
@@ -74,6 +75,12 @@ pub fn csv_to_markdown(file_path: &str, delimiter: Option<u8>, encoding: &str) -
         data_rows.push(row);
     }
 
+    // A headerless file must not lose its first row to the header slot. (#26)
+    if !first_row_is_header(&headers, &data_rows) {
+        max_width = max_width.max(headers.len());
+        data_rows.insert(0, std::mem::take(&mut headers));
+        headers = synthetic_headers(max_width);
+    }
     headers = normalize_headers(headers, max_width);
 
     for row in &mut data_rows {

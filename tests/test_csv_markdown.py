@@ -75,13 +75,31 @@ def test_empty_file_returns_empty_string(tmp_path):
     assert csv_to_markdown(str(p)) == ""
 
 
-def test_single_header_no_data(tmp_path):
+def test_single_row_is_data_not_a_header(tmp_path):
+    """A one-row CSV is a row of data, not a lone header.
+
+    CSV has no way to declare a header, so the engine infers it (#26). With no
+    rows beneath it there is nothing to infer from, and guessing "header" would
+    make get_chunks return ZERO chunks for a perfectly valid file — total
+    content loss. Guessing "data" only costs a synthetic column label, so that
+    is the tie-break. This used to assert the opposite.
+    """
     p = write_csv(tmp_path / "t.csv", [["A", "B", "C"]])
-    result = csv_to_markdown(str(p))
-    lines = result.splitlines()
-    assert len(lines) == 2
-    assert "A" in lines[0]
+    lines = csv_to_markdown(str(p)).splitlines()
+    assert len(lines) == 3
+    assert "Column 1" in lines[0]
     assert "---" in lines[1]
+    assert "A" in lines[2] and "B" in lines[2] and "C" in lines[2]
+
+
+def test_single_row_csv_still_yields_a_chunk(tmp_path):
+    """The reason the rule above is what it is."""
+    from py_chunks import get_chunks  # pylint: disable=import-outside-toplevel
+
+    p = write_csv(tmp_path / "one.csv", [["A", "B", "C"]])
+    chunks = get_chunks(str(p))
+    assert len(chunks) == 1
+    assert "A" in chunks[0]["content"]
 
 
 # ---------------------------------------------------------------------------
