@@ -13,7 +13,7 @@ use pythonize::pythonize;
 use serde_json::json;
 
 use super::extract::{document_to_markdown, parse_message_bytes};
-use super::mbox::mbox_to_markdown;
+use super::mbox::{mbox_to_markdown, MboxMessageInfo};
 use crate::extensions::md::common::ChunkRecordInput;
 use crate::extensions::md::page_aware::build_page_aware_chunks;
 use crate::extensions::md::section::build_section_chunks;
@@ -45,17 +45,17 @@ struct Loaded {
 
 /// Read the file and assemble markdown + images + document metadata, dispatching
 /// on `.eml` vs `.mbox`.
-fn load_email(file_path: &str) -> PyResult<Loaded> {
+fn load_email(file_path: &str) -> PyResult<(Loaded, Vec<MboxMessageInfo>)> {
     let raw = std::fs::read(file_path)
         .map_err(|e| PyIOError::new_err(format!("Failed to read email file: {e}")))?;
 
     if is_mbox(file_path) {
-        let (markdown, images, count) = mbox_to_markdown(&raw);
+        let (markdown, images, count, infos) = mbox_to_markdown(&raw);
         let metadata = json!({
             "source_type": "mbox",
             "message_count": count,
         });
-        Ok(Loaded { markdown, images, metadata })
+        Ok((Loaded { markdown, images, metadata }, infos))
     } else {
         let doc = parse_message_bytes(&raw);
         let markdown = document_to_markdown(&doc, 1);
@@ -68,10 +68,12 @@ fn load_email(file_path: &str) -> PyResult<Loaded> {
             "bcc": doc.bcc,
             "date": doc.date,
             "message_id": doc.message_id,
+            "in_reply_to": doc.in_reply_to,
+            "references": doc.references,
             "has_attachments": !doc.attachments.is_empty(),
             "attachment_count": doc.attachments.len(),
         });
-        Ok(Loaded { markdown, images: doc.images, metadata })
+        Ok((Loaded { markdown, images: doc.images, metadata }, Vec::new()))
     }
 }
 
@@ -110,8 +112,49 @@ fn record_to_pydict(py: Python<'_>, rec: &ChunkRecordInput) -> PyResult<PyObject
     Ok(dict.into_any().unbind())
 }
 
+/// Give each `.mbox` chunk the identity of the message it came from.
+///
+/// Same shape as the `.odp` slide pass: the `## Message N` heading marks the
+/// boundary. A 152-message mailbox used to give every chunk the same
+/// `{source_type, message_count}` — the per-message envelope was parsed and
+/// thrown away, so "which message is this?" was unanswerable. (#36)
+fn inject_message_metadata(chunks: &mut [ChunkRecordInput], infos: &[MboxMessageInfo]) {
+    let by_index: std::collections::HashMap<u64, &MboxMessageInfo> =
+        infos.iter().map(|i| (i.index as u64, i)).collect();
+    let mut current: Option<u64> = None;
+
+    for chunk in chunks.iter_mut() {
+        if let Some(n) = message_number_of(chunk.content.trim()) {
+            current = Some(n);
+        } else if let Some(n) = chunk
+            .metadata
+            .get("section_heading")
+            .and_then(|v| v.as_str())
+            .and_then(message_number_of)
+        {
+            current = Some(n);
+        }
+        let Some(n) = current else { continue };
+        let Some(info) = by_index.get(&n) else { continue };
+        if let Some(map) = chunk.metadata.as_object_mut() {
+            map.insert("message_index".into(), serde_json::json!(n));
+            map.insert("message_subject".into(), serde_json::json!(info.subject));
+            map.insert("message_from".into(), serde_json::json!(info.from));
+            map.insert("message_date".into(), serde_json::json!(info.date));
+            map.insert("message_id".into(), serde_json::json!(info.message_id));
+            map.insert("in_reply_to".into(), serde_json::json!(info.in_reply_to));
+            map.insert("references".into(), serde_json::json!(info.references));
+        }
+    }
+}
+
+/// `"Message 7"` -> `Some(7)`.
+fn message_number_of(text: &str) -> Option<u64> {
+    text.strip_prefix("Message ")?.trim().parse().ok()
+}
+
 fn build_records(
-    loaded: &Loaded,
+    loaded_and_infos: &(Loaded, Vec<MboxMessageInfo>),
     mode: &str,
     window_size: usize,
     overlap: usize,
@@ -122,6 +165,7 @@ fn build_records(
     // and no headers) yields no markdown. Return zero chunks rather than erroring,
     // matching how the library treats other empty documents (e.g. image-only
     // notebooks) — and keeping batch/stream/bytes consistent.
+    let (loaded, infos) = loaded_and_infos;
     if loaded.markdown.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -135,6 +179,9 @@ fn build_records(
     )
     .map_err(PyRuntimeError::new_err)?;
     inject_metadata(&mut records, &loaded.metadata);
+    if !infos.is_empty() {
+        inject_message_metadata(&mut records, infos);
+    }
     Ok(records)
 }
 
@@ -198,7 +245,7 @@ fn chunk_eml_sliding_window(py: Python<'_>, file_path: &str, window_size: usize,
 #[pyfunction]
 fn eml_to_markdown(file_path: &str) -> PyResult<String> {
     ensure_email(file_path)?;
-    Ok(load_email(file_path)?.markdown)
+    Ok(load_email(file_path)?.0.markdown)
 }
 
 #[pyfunction]
@@ -207,7 +254,7 @@ fn eml_to_markdown_with_images(
     file_path: &str,
 ) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
     ensure_email(file_path)?;
-    let loaded = load_email(file_path)?;
+    let loaded = load_email(file_path)?.0;
     let images = loaded
         .images
         .iter()
@@ -244,6 +291,7 @@ fn chunk_eml_with_images(
 
     // Image chunks first, then text chunks — matching the other formats.
     let mut chunk_list: Vec<PyObject> = loaded
+        .0
         .images
         .iter()
         .map(|(name, _)| {
@@ -261,6 +309,7 @@ fn chunk_eml_with_images(
     }
 
     let images = loaded
+        .0
         .images
         .iter()
         .map(|(name, bytes)| (name.clone(), PyBytes::new_bound(py, bytes).unbind()))
