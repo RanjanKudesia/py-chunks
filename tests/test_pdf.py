@@ -337,3 +337,38 @@ class TestPdfStreamingValidation:
     def test_invalid_mode_raises(self):
         with pytest.raises((ValueError, NotImplementedError)):
             stream_chunk_pdf(str(SAMPLE_PDF), mode="not_a_real_mode")
+
+
+# ── Author/affiliation blocks are columns, not tables (#58) ───────────────────
+
+ATTENTION_PDF = TEST_FILES_DIR / "arxiv_1706.03762_attention.pdf"
+
+
+@pytest.mark.skipif(not ATTENTION_PDF.exists(), reason="missing arxiv attention fixture")
+def test_byline_is_transposed_not_a_table():
+    """Each author must keep their own affiliation and email.
+
+    The byline is laid out as columns; read across as a table it pairs every
+    author with the wrong affiliation.
+    """
+    md = _py_chunks.get_markdown(str(ATTENTION_PDF))
+    head = md[: md.index("## Abstract")]
+    assert "Ashish Vaswani∗, Google Brain, avaswani@google.com" in head, head
+    assert "Aidan N. Gomez∗ †, University of Toronto, aidan@cs.toronto.edu" in head, head
+    assert "|" not in head, f"byline still rendered as a table: {head}"
+
+
+@pytest.mark.skipif(not ATTENTION_PDF.exists(), reason="missing arxiv attention fixture")
+def test_real_tables_are_left_alone():
+    """The rewrite must be narrow — the paper's own result tables stay tables."""
+    md = _py_chunks.get_markdown(str(ATTENTION_PDF))
+    body = md[md.index("## Abstract"):]
+    assert body.count("|---") > 5, "result tables were flattened too"
+
+
+@pytest.mark.skipif(not ATTENTION_PDF.exists(), reason="missing arxiv attention fixture")
+def test_byline_survives_into_chunks():
+    chunks = get_chunks(str(ATTENTION_PDF), mode="semantic")
+    text = "\n".join(c["content"] for c in chunks[:6])
+    assert "avaswani@google.com" in text
+    assert "Google Brain" in text

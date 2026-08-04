@@ -1,6 +1,7 @@
 //! PDF support, backed by the `liteparse` crate for high-quality PDF → markdown
 //! conversion, with chunking delegated to the Markdown chunker.
 
+pub mod author_block;
 pub mod chunkers;
 pub mod liteparse_backend;
 

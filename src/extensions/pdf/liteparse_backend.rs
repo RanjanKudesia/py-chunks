@@ -110,7 +110,11 @@ pub fn pdf_to_markdown(
 
 
         Ok(PdfConversion {
-            markdown,
+            // rs-chunks applies this in `pdf::pdf_loaded`, the single funnel its
+            // two entry styles share. This crate's PDF chunkers call the backend
+            // from four places and have no such funnel, so it is applied here —
+            // one place, same resulting markdown.
+            markdown: super::author_block::normalize(&markdown),
             images,
             total_pages,
         })
