@@ -44,7 +44,7 @@ fn load_odf(file_path: &str) -> PyResult<Loaded> {
     let bytes = std::fs::read(file_path)
         .map_err(|e| PyIOError::new_err(format!("Failed to read ODF file: {e}")))?;
     let container = load(&bytes, kind).map_err(PyRuntimeError::new_err)?;
-    let (markdown, slide_count) = content_to_markdown(&container.content_xml, kind);
+    let (markdown, slide_count) = content_to_markdown(&container.content_xml, kind, &container.image_names);
     let (title, creator) = container
         .meta_xml
         .as_deref()
