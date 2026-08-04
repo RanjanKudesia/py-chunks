@@ -94,6 +94,81 @@ fn inject_metadata(records: &mut [ChunkRecordInput], meta: &serde_json::Value) {
     }
 }
 
+/// Give `.odp` chunks the slide identity `.pptx` chunks already carry.
+///
+/// Slide identity existed only as an unstructured `## Slide N` markdown
+/// heading, so a consumer had to string-parse `section_heading` to answer
+/// "which slide is this?" — while the same question on a `.pptx` is a metadata
+/// lookup. (#52)
+///
+/// The title is the slide's first line of text, which is what a reader would
+/// call its title; `.odp` has no title element the way `.pptx` does.
+fn inject_slide_metadata(chunks: &mut [ChunkRecordInput]) {
+    let mut slide: Option<u64> = None;
+    let mut title: Option<String> = None;
+    let mut titles: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+
+    for chunk in chunks.iter_mut() {
+        let heading_here = slide_number_of(chunk.content.trim());
+        let heading_ctx = chunk
+            .metadata
+            .get("section_heading")
+            .and_then(|v| v.as_str())
+            .and_then(slide_number_of);
+
+        if let Some(n) = heading_here {
+            // The `## Slide N` heading chunk itself starts a new slide.
+            slide = Some(n);
+            title = None;
+        } else if let Some(n) = heading_ctx {
+            if slide != Some(n) {
+                slide = Some(n);
+                title = None;
+            }
+            if title.is_none() {
+                title = chunk
+                    .content
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(str::to_string);
+            }
+        }
+
+        if let Some(n) = slide {
+            if let Some(t) = &title {
+                titles.entry(n).or_insert_with(|| t.clone());
+            }
+            if let Some(map) = chunk.metadata.as_object_mut() {
+                map.insert("slide_number".into(), serde_json::json!(n));
+            }
+        }
+    }
+
+    // Second pass: the `## Slide N` heading chunk is emitted before the slide's
+    // first line of text, so its title is not known yet on the way through.
+    // Backfill it, rather than leave one chunk per slide with a null title
+    // while its siblings have one.
+    for chunk in chunks.iter_mut() {
+        let Some(n) = chunk
+            .metadata
+            .get("slide_number")
+            .and_then(|v| v.as_u64())
+        else {
+            continue;
+        };
+        let t = titles.get(&n).cloned();
+        if let Some(map) = chunk.metadata.as_object_mut() {
+            map.insert("slide_title".into(), serde_json::json!(t));
+        }
+    }
+}
+
+/// `"Slide 4"` -> `Some(4)`.
+fn slide_number_of(text: &str) -> Option<u64> {
+    text.strip_prefix("Slide ")?.trim().parse().ok()
+}
+
 fn record_to_pydict(py: Python<'_>, rec: &ChunkRecordInput) -> PyResult<PyObject> {
     let dict = PyDict::new_bound(py);
     dict.set_item("content", &rec.content)?;
@@ -123,6 +198,10 @@ fn build_records(
     )
     .map_err(PyRuntimeError::new_err)?;
     inject_metadata(&mut records, &loaded.metadata);
+    // `.odt` has no slides, so this is a no-op there. (#52)
+    if loaded.metadata.get("source_type").and_then(|v| v.as_str()) == Some("odp") {
+        inject_slide_metadata(&mut records);
+    }
     Ok(records)
 }
 
