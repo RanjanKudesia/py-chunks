@@ -65,7 +65,7 @@ def _run_pdf_mode(
         return _rust.chunk_pdf_page_aware(path_str, paragraphs_per_page)
     if mode == "sliding_window":
         return _rust.chunk_pdf_sliding_window(path_str, window_size, overlap)
-    return _rust.chunk_pdf(path_str)
+    return _rust.chunk_pdf_structural(path_str)
 
 
 def chunk_pdf(
@@ -81,17 +81,18 @@ def chunk_pdf(
     Args:
         file_path: Path to the .pdf file.
         mode: Chunking mode. One of:
-              ``"default"``     — fast lightweight extraction via
-              ``chunk_pdf_fast`` (minimal font analysis).
-              ``"structural"``  — full font-size-weighted span pipeline via
-              ``chunk_pdf``.
+              ``"default"``     — heading sizes ranked within each page, via
+              ``chunk_pdf_fast``. Holds one page at a time.
+              ``"structural"``  — heading sizes ranked across the whole
+              document, via ``chunk_pdf_structural``.
               ``"section"``     — heading-scoped grouping.
               ``"semantic"``    — heuristic topic-continuity grouping.
               ``"sliding_window"`` — overlapping paragraph windows.
               ``"sentence"``    — N sentences per chunk.
               ``"page_aware"``  — page-boundary grouping.
               ``"default"`` and ``"structural"`` are not equivalent for
-              PDF and may produce different output on the same file.
+              PDF: they extract the same text and differ only in which
+              lines are called headings, and at what level.
 
     Returns:
         (chunks, timing) where:

@@ -20,14 +20,26 @@ crate::bind_images! {
     no_row_args,
 }
 
-/// Shipped as a separate entry point; it has always run the same path as
-/// `default` (TECH_DEBT #54 tracks the docs that claim otherwise).
+/// The `default` mode: per-page heading ranking, no document-wide pass.
 #[pyfunction]
 fn chunk_pdf_fast(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
     __run_mode(py, file_path, "default", 3, 1, 3, 15)
 }
 
+/// The `structural` mode: heading levels ranked across the whole document.
+///
+/// PDF needs its own entry point because `bind_format!`'s generated
+/// `chunk_pdf` passes `"default"` — correct for every other format, where the
+/// two modes *are* the same pipeline, and silently wrong for PDF now that they
+/// differ (TECH_DEBT #54). Without this, Python's `structural` would take the
+/// fast path while Rust's and JavaScript's did not.
+#[pyfunction]
+fn chunk_pdf_structural(py: Python<'_>, file_path: &str) -> PyResult<PyObject> {
+    __run_mode(py, file_path, "structural", 3, 1, 3, 15)
+}
+
 pub fn register_extra(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(chunk_pdf_fast, m)?)?;
+    m.add_function(wrap_pyfunction!(chunk_pdf_structural, m)?)?;
     Ok(())
 }
