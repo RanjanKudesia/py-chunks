@@ -1,19 +1,13 @@
-pub mod common;
-pub mod page_aware;
-pub mod section;
-pub mod semantic;
-pub mod sentence;
-pub mod sliding_window;
-pub mod structural;
-pub mod to_markdown;
+//! Word OOXML (`.docx` / `.docm` / `.dotx` / `.dotm`) support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::docx`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
+
+pub mod chunkers;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
-    structural::register(m)?;
-    page_aware::register(m)?;
-    section::register(m)?;
-    sentence::register(m)?;
-    semantic::register(m)?;
-    sliding_window::register(m)?;
-    to_markdown::register(m)?;
+    chunkers::register(m)?;
+    chunkers::register_images(m)?;
+    chunkers::register_markdown(m)?;
     Ok(())
 }
