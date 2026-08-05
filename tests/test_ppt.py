@@ -50,7 +50,15 @@ def test_all_modes_produce_chunks(fp, mode):
 
 
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
-def test_metadata_schema_matches_doc(fp):
+def test_metadata_is_slide_aware(fp):
+    """A deck describes itself in presentation vocabulary (TECH_DEBT #18).
+
+    This test previously asserted that `.ppt` metadata matched `.doc`'s
+    exactly, with `page_number` always None — codifying the defect rather than
+    the contract. `.ppt` reuses `.doc`'s *chunkers*, which is an implementation
+    detail; it should not have made a presentation describe itself as a
+    document.
+    """
     chunks, _ = chunk_ppt(str(fp))
     meta = chunks[0]["metadata"]
     assert set(meta) == {
@@ -60,8 +68,16 @@ def test_metadata_schema_matches_doc(fp):
         "paragraph_type",
         "heading_level",
         "page_number",
+        "slide_number",
+        "slide_title",
+        "document_metadata",
     }
-    assert meta["page_number"] is None
+    # Slides are real structure, unlike `.doc` pages: every chunk has one.
+    assert isinstance(meta["slide_number"], int) and meta["slide_number"] >= 1
+    # page_number is the shipped key and means the same thing for a deck.
+    assert meta["page_number"] == meta["slide_number"]
+    assert meta["document_metadata"]["source_type"] == "ppt"
+    assert meta["document_metadata"]["total_slides"] >= meta["slide_number"]
 
 
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
