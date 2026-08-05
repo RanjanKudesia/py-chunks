@@ -96,7 +96,7 @@ from py_chunks import get_chunks
 
 result = get_chunks("report.docx", list_images=True)   # -> ChunksResult
 result.chunks   # text chunks + content_type="image" chunks
-result.images   # {"8c4a2b4ccec6f521.png": b"...", ...}
+result.images   # {"7fdc906103e95537.png": b"...", ...}  <16-hex content hash>.<ext>
 ```
 
 `get_markdown(..., list_images=True)` returns a `MarkdownResult` with `.markdown`
