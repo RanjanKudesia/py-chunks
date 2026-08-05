@@ -19,35 +19,34 @@ from py_chunks.chunkers.txt import chunk_txt, stream_chunk_txt
 
 # ── Fixture discovery ─────────────────────────────────────────────────────────
 
-_CANDIDATE_DIRS = [
-    Path(__file__).resolve().parents[2] / "test_files",
-    Path(__file__).resolve().parents[2] / "test_input_files",
-    # Fixtures were reorganised into per-format subdirectories.
-    Path(__file__).resolve().parents[2] / "test_files" / "txt",
-]
+TXT_DIR = Path(__file__).resolve().parents[2] / "test_files" / "txt"
 
-_TXT_NAMES = ["prose_article.txt", "structured_report.txt", "test.txt"]
+# Naming a fixed list of three files is why TECH_DEBT #30–33 went uncaught: the
+# encoding, line-ending and degenerate-input fixtures could sit in the corpus
+# without a single test ever opening them. Walk the directory instead, so a
+# fixture counts the moment it is added (#34).
+ALL_TXT_FILES = sorted(TXT_DIR.glob("*.txt")) if TXT_DIR.exists() else []
 
+# Files that are *meant* to raise — an empty or whitespace-only document has no
+# content to chunk, and saying so is the contract. They are excluded from the
+# sweeps that assert non-empty output and asserted on directly instead.
+EMPTY_FIXTURES = {"edge_empty.txt", "edge_whitespace_only.txt"}
+CHUNKABLE_TXT_FILES = [p for p in ALL_TXT_FILES if p.name not in EMPTY_FIXTURES]
 
-def _resolve_txt_files() -> list[Path]:
-    for base in _CANDIDATE_DIRS:
-        if not base.exists():
-            continue
-        paths = [base / name for name in _TXT_NAMES]
-        if all(p.exists() for p in paths):
-            return paths
-    return []
+# The three hand-authored documents the older tests were written against. Kept
+# as a named subset so the assertions that depend on their specific content
+# still have something to point at.
+_PROSE_NAMES = ["prose_article.txt", "structured_report.txt", "test.txt"]
+PROSE_TXT_FILES = [p for p in ALL_TXT_FILES if p.name in _PROSE_NAMES]
 
-
-ALL_TXT_FILES = _resolve_txt_files()
-
-if len(ALL_TXT_FILES) != 3:
+if len(PROSE_TXT_FILES) != 3 or len(CHUNKABLE_TXT_FILES) < 10:
     pytest.skip(
-        "Expected plain text fixtures (prose_article.txt, structured_report.txt,"
-        " test.txt) in test_files/",
+        f"Expected the plain-text fixture corpus in {TXT_DIR} — the three prose "
+        "documents plus at least ten chunkable fixtures (TECH_DEBT #34)",
         allow_module_level=True,
     )
 
+ALL_TXT_FILES = CHUNKABLE_TXT_FILES
 TXT_IDS = [p.name for p in ALL_TXT_FILES]
 STANDARD_KEYS = {"content", "content_type", "metadata"}
 VALID_CONTENT_TYPES = {
@@ -398,3 +397,156 @@ class TestTxtValidation:
         wrong_ext.write_bytes(txt_file.read_bytes())
         with pytest.raises(ValueError):
             chunk_txt(str(wrong_ext), mode="structural")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 9. THE EDGE-CASE CORPUS (TECH_DEBT #34)
+#
+# The corpus used to be three hand-authored prose documents, so nothing
+# exercised an empty file, a lone line, a non-UTF-8 encoding, a Windows line
+# ending or a grapheme that must not be split. That is why #30–#33 shipped.
+# These tests assert on the fixtures those defects would have failed.
+# ════════════════════════════════════════════════════════════════════════════
+
+MAX_CHUNK_CHARS = 1200
+
+
+def _fixture(name: str) -> Path:
+    p = TXT_DIR / name
+    if not p.exists():
+        pytest.skip(f"fixture missing: {p}")
+    return p
+
+
+class TestTxtDegenerateInputs:
+    """A document with nothing in it must say so, not return an empty list."""
+
+    @pytest.mark.parametrize("name", sorted(EMPTY_FIXTURES))
+    def test_empty_input_raises_rather_than_returning_nothing(self, name):
+        with pytest.raises(RuntimeError, match="empty"):
+            get_chunks(str(_fixture(name)), mode="structural")
+
+    @pytest.mark.parametrize(
+        "name", ["edge_single_line_no_newline.txt", "edge_single_word.txt"]
+    )
+    def test_a_single_line_still_chunks(self, name):
+        chunks = get_chunks(str(_fixture(name)), mode="structural")
+        assert len(chunks) == 1
+        assert chunks[0]["content"].strip()
+
+
+class TestTxtEncodings:
+    """Every fixture must decode as what it is — no replacement chars, no NULs.
+
+    #30/#31/#32 were all of this shape, and none of them had a fixture.
+    """
+
+    @pytest.mark.parametrize("txt_path", ALL_TXT_FILES, ids=TXT_IDS)
+    def test_no_replacement_characters_anywhere(self, txt_path):
+        chunks = get_chunks(str(txt_path), mode="structural")
+        for c in chunks:
+            assert "�" not in c["content"], (
+                f"{txt_path.name}: U+FFFD in output — the encoding was guessed wrong"
+            )
+            assert "\x00" not in c["content"], f"{txt_path.name}: raw NUL in output"
+            assert "﻿" not in c["content"], f"{txt_path.name}: BOM leaked through"
+
+    def test_utf16be_without_a_bom_is_sniffed(self):
+        chunks = get_chunks(str(_fixture("edge_utf16be_nobom.txt")), mode="structural")
+        text = "\n".join(c["content"] for c in chunks)
+        assert "UTF-16BE WITHOUT A BOM" in text
+        assert "byte order mark" in text
+
+    def test_latin1_accents_survive(self):
+        chunks = get_chunks(str(_fixture("edge_latin1.txt")), mode="structural")
+        text = "\n".join(c["content"] for c in chunks)
+        for word in ("Naïve", "café", "résumé", "Zürich", "Straße", "façade"):
+            assert word in text, f"{word!r} did not survive the 8-bit fallback"
+
+
+class TestTxtMultibyteAndGraphemes:
+    """Multi-byte text must never be cut through the middle of a character."""
+
+    @pytest.mark.parametrize("mode", ["structural", "section", "semantic", "sentence"])
+    def test_multilingual_output_is_valid_and_whole(self, mode):
+        chunks = get_chunks(str(_fixture("edge_multilingual.txt")), mode=mode)
+        text = "".join(c["content"] for c in chunks)
+        # A mid-character split would surface as a replacement character once the
+        # bytes were reassembled into str.
+        assert "�" not in text
+        for sample in ("日本語の段落です", "中文段落", "פסקה בעברית", "فقرة باللغة"):
+            assert sample in text, f"{sample!r} was broken up"
+
+    def test_emoji_zwj_sequences_are_not_split(self):
+        chunks = get_chunks(str(_fixture("edge_multilingual.txt")), mode="structural")
+        text = "".join(c["content"] for c in chunks)
+        for grapheme in ("\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466",
+                         "\U0001F3F3️‍\U0001F308",
+                         "\U0001F44D\U0001F3FD"):
+            assert grapheme in text, "a multi-code-point grapheme was split"
+
+
+class TestTxtRealWorldShapes:
+
+    def test_an_application_log_keeps_its_stack_trace_together(self):
+        chunks = get_chunks(str(_fixture("realworld_application_log.txt")),
+                            mode="structural")
+        text = "\n".join(c["content"] for c in chunks)
+        assert "java.lang.IllegalStateException" in text
+        assert "Caused by: java.net.SocketTimeoutException" in text
+        assert "... 14 more" in text
+
+    def test_an_ascii_table_is_classified_as_a_table(self):
+        chunks = get_chunks(str(_fixture("realworld_ascii_tables.txt")),
+                            mode="structural")
+        assert any(c["content_type"] == "table" for c in chunks), (
+            f"types: {[c['content_type'] for c in chunks]}"
+        )
+
+    def test_real_prose_chunks_into_many_pieces(self):
+        """A whole Sherlock Holmes story is one document, not one chunk."""
+        chunks = get_chunks(str(_fixture("gutenberg_sherlock_scandal.txt")),
+                            mode="structural")
+        assert len(chunks) > 20
+        text = "\n".join(c["content"] for c in chunks)
+        assert "A SCANDAL IN BOHEMIA" in text
+        assert "Irene Adler" in text
+
+
+class TestTxtAllCapsHeuristic:
+    """TECH_DEBT #33 — measured, not assumed.
+
+    Against the old three-document corpus the ALL-CAPS rule fired 55 times and
+    was right every time, which is why narrowing it was refused. With real books
+    in the corpus it is provably wrong on some lines, so this test records both
+    halves: the headings it must keep calling headings, and the lines a future
+    narrowing has to stop calling headings.
+    """
+
+    @staticmethod
+    def _headings(name: str) -> set[str]:
+        chunks = get_chunks(str(_fixture(name)), mode="structural")
+        return {c["content"].strip() for c in chunks if c["content_type"] == "heading"}
+
+    def test_genuine_all_caps_headings_are_still_headings(self):
+        found = self._headings("adversarial_allcaps.txt")
+        for heading in ("OPERATIONS RUNBOOK", "INTRODUCTION", "ESCALATION PATH",
+                        "APPENDIX A: GLOSSARY"):
+            assert heading in found, f"{heading!r} must stay a heading"
+
+    def test_real_prose_headings_are_still_headings(self):
+        assert "A SCANDAL IN BOHEMIA" in self._headings(
+            "gutenberg_sherlock_scandal.txt"
+        )
+
+    @pytest.mark.xfail(
+        reason="TECH_DEBT #33: the ALL-CAPS rule has no way to tell a heading "
+               "from a machine marker or a clause number. Now reproducible "
+               "against real text rather than a constructed example.",
+        strict=True,
+    )
+    def test_machine_markers_are_not_headings(self):
+        found = self._headings("gutenberg_moby_dick_frontmatter.txt")
+        assert "*** START OF THE PROJECT GUTENBERG EBOOK MOBY DICK; OR, THE WHALE ***" \
+            not in found
+        assert "1.F." not in found
