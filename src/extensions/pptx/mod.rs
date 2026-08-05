@@ -1,23 +1,15 @@
-pub mod common;
-pub mod chart;
-pub mod diagram;
-pub mod page_aware;
-pub mod section;
-pub mod semantic;
-pub mod sentence;
-pub mod sliding_window;
-pub mod stream_iter;
-pub mod structural;
-pub mod to_markdown;
+//! PowerPoint OOXML (`.pptx` / `.potx` / `.potm` / `.ppsx` / `.ppsm`) support.
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::pptx`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
+
+pub mod chunkers;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
-    structural::register(m)?;
-    section::register(m)?;
-    semantic::register(m)?;
-    sliding_window::register(m)?;
-    sentence::register(m)?;
-    page_aware::register(m)?;
-    stream_iter::register(m)?;
-    to_markdown::register(m)?;
+    chunkers::register_chunkers(m)?;
+    chunkers::register_streams(m)?;
+    chunkers::register_images(m)?;
+    chunkers::register_markdown(m)?;
+    chunkers::register_aliases(m)?;
     Ok(())
 }

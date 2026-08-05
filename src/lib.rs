@@ -1,5 +1,6 @@
 mod engine;
 mod engine_per_mode;
+mod engine_streams;
 mod extensions;
 
 use pyo3::prelude::*;

@@ -13,6 +13,40 @@ _PPTX_MODES = {
     "sliding_window", "sentence", "page_aware",
 }
 
+# One wording per rejection, shared by every entry point. `slides_per_chunk` is
+# the preferred public name for the page_aware parameter, but the message keeps
+# the legacy `paragraphs_per_page` spelling it has always used — the two are
+# aliases and renaming it here would break callers matching on the text.
+_E_WINDOW = "window_size must be greater than 0"
+_E_OVERLAP = "overlap must be less than window_size"
+_E_SENTENCES = "sentences_per_chunk must be greater than 0"
+_E_SLIDES = "paragraphs_per_page must be greater than 0"
+
+
+def _validate_pptx_mode_args(
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> None:
+    """Raise for argument values the requested mode cannot use.
+
+    Shared by the batch, streaming and with-images entry points so all three
+    reject the same argument with the same wording. They used to each have
+    their own copy, and the streaming one skipped this entirely and let the
+    Rust layer raise — in a different wording again.
+    """
+    if mode == "sliding_window":
+        if window_size <= 0:
+            raise ValueError(_E_WINDOW)
+        if overlap >= window_size:
+            raise ValueError(_E_OVERLAP)
+    if mode == "sentence" and sentences_per_chunk <= 0:
+        raise ValueError(_E_SENTENCES)
+    if mode == "page_aware" and paragraphs_per_page <= 0:
+        raise ValueError(_E_SLIDES)
+
 
 def _validate_pptx_args(
     file_path: str,
@@ -33,15 +67,9 @@ def _validate_pptx_args(
         raise ValueError(
             f"mode must be one of {sorted(_PPTX_MODES)} for PPTX, got: '{mode}'"
         )
-    if mode == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be greater than 0")
-        if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
-    if mode == "sentence" and sentences_per_chunk <= 0:
-        raise ValueError("sentences_per_chunk must be greater than 0")
-    if mode == "page_aware" and paragraphs_per_page <= 0:
-        raise ValueError("paragraphs_per_page must be greater than 0")
+    _validate_pptx_mode_args(
+        mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
+    )
 
 
 def _call_pptx_rust(
@@ -156,6 +184,7 @@ def stream_chunk_pptx(
             f"mode must be one of {sorted(_PPTX_MODES)} for PPTX streaming, got: '{mode}'"
         )
     _slides = slides_per_chunk if slides_per_chunk is not None else paragraphs_per_page
+    _validate_pptx_mode_args(mode, window_size, overlap, sentences_per_chunk, _slides)
     return _rust.stream_pptx_chunks(
         str(path), mode, window_size, overlap, sentences_per_chunk, _slides,
     )
@@ -207,6 +236,9 @@ def chunk_pptx_with_images(
     _slides = slides_per_chunk if slides_per_chunk is not None else paragraphs_per_page
     normalized_mode = "structural" if mode == "default" else mode
     path_str = str(path)
+    _validate_pptx_mode_args(
+        normalized_mode, window_size, overlap, sentences_per_chunk, _slides
+    )
 
     if normalized_mode == "structural":
         chunk_list, image_list = _rust.chunk_pptx_structural_with_images(path_str)
@@ -215,22 +247,14 @@ def chunk_pptx_with_images(
     elif normalized_mode == "semantic":
         chunk_list, image_list = _rust.chunk_pptx_semantic_with_images(path_str)
     elif normalized_mode == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be > 0")
-        if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
         chunk_list, image_list = _rust.chunk_pptx_sliding_window_with_images(
             path_str, window_size, overlap
         )
     elif normalized_mode == "sentence":
-        if sentences_per_chunk <= 0:
-            raise ValueError("sentences_per_chunk must be greater than 0")
         chunk_list, image_list = _rust.chunk_pptx_sentence_with_images(
             path_str, sentences_per_chunk
         )
     elif normalized_mode == "page_aware":
-        if _slides <= 0:
-            raise ValueError("slides_per_chunk must be greater than 0")
         chunk_list, image_list = _rust.chunk_pptx_page_aware_with_images(path_str, _slides)
     else:
         raise ValueError(f"Unknown mode: {mode!r}")

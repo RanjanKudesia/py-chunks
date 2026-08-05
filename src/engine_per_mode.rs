@@ -1,59 +1,31 @@
-//! Binding generator for the legacy binary formats (`.doc`, `.ppt`).
+//! Binding generator for formats with a *per-mode* pyfunction surface.
 //!
-//! These two shipped a *per-mode* pyfunction surface rather than the
-//! `chunk(path, mode, …)` pair [`crate::bind_format`] assumes: 6 chunkers, 6
-//! stream entry points each returning its own `#[pyclass]`, 6 image variants,
-//! and 2 markdown functions — 20 names and 6 classes per format, all importable
-//! from `py_chunks._rust` and therefore all part of the ABI. They are generated
-//! rather than written twice, for the reason `bind_format!` exists: the second
-//! copy is where the fork grows back (see CONSOLIDATION_PLAN.md).
+//! `.doc`, `.ppt`, `.docx` and `.pptx` all shipped one pyfunction per chunking
+//! mode rather than the `chunk(path, mode, …)` pair [`crate::bind_format`]
+//! assumes — 6 chunkers, 6 image variants and 2 markdown functions each, plus a
+//! streaming surface that differs per format (see `engine_streams.rs`). Every
+//! one of those names is importable from `py_chunks._rust` and therefore part
+//! of the ABI. They are generated rather than written four times, for the
+//! reason `bind_format!` exists: the second copy is where the fork grows back
+//! (see CONSOLIDATION_PLAN.md).
 //!
 //! Every name is spelled out at the call site rather than derived from a
 //! prefix. These identifiers are the public surface, so `grep` must find them.
+//!
+//! Split into core (this file) and streams because the streaming shape is the
+//! one thing the four formats disagree on: `.doc`/`.ppt`/`.docx` expose six
+//! per-mode entry points returning six distinct iterator classes, `.pptx` a
+//! single generic `stream_pptx_chunks`. Both stream macros expand alongside
+//! [`bind_per_mode_core!`] and use the `__engine` alias and `__chunks_for`
+//! helper it brings into scope.
 
-/// Per-mode stream iterators. Chunks are converted once at construction; the
-/// engine materialises its `stream` anyway, so this is what the fork did too.
-#[macro_export]
-#[doc(hidden)]
-macro_rules! __per_mode_iterators {
-    ($($cls:ident),* $(,)?) => {
-        $(
-            #[pyclass]
-            pub struct $cls {
-                chunks: std::vec::IntoIter<PyObject>,
-            }
-
-            #[pymethods]
-            impl $cls {
-                fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-                    slf
-                }
-                fn __next__(&mut self) -> Option<PyObject> {
-                    self.chunks.next()
-                }
-            }
-
-            impl $cls {
-                fn build(
-                    py: Python<'_>,
-                    chunks: &[chunks_rs::chunk::Chunk],
-                ) -> PyResult<Self> {
-                    Ok($cls {
-                        chunks: $crate::engine::chunks_to_pylist(py, chunks)?.into_iter(),
-                    })
-                }
-            }
-        )*
-    };
-}
-
-/// The whole `.doc` / `.ppt` pyfunction surface over a vendored-engine module.
+/// The mode-dispatching half: chunkers, image variants, markdown.
 ///
-/// The engine owns mode dispatch, argument validation and error text; this
-/// expansion only names the modes and converts the results. Anything more than
-/// that belongs in `rs-chunks`.
+/// Emits `register_chunkers`, `register_images` and `register_markdown`, plus
+/// the `__engine` / `__run_mode` / `__run_images` / `__chunks_for` items the
+/// stream macros build on.
 #[macro_export]
-macro_rules! bind_per_mode_format {
+macro_rules! bind_per_mode_core {
     (
         engine = $eng:path,
         chunkers = {
@@ -63,22 +35,6 @@ macro_rules! bind_per_mode_format {
             sliding      = $f_slide:ident,
             sentence     = $f_sentence:ident,
             page_aware   = $f_page:ident,
-        },
-        streams = {
-            structural   = $s_struct:ident,
-            section      = $s_section:ident,
-            semantic     = $s_semantic:ident,
-            sliding      = $s_slide:ident,
-            sentence     = $s_sentence:ident,
-            page_aware   = $s_page:ident,
-        },
-        iterators = {
-            structural   = $i_struct:ident,
-            section      = $i_section:ident,
-            semantic     = $i_semantic:ident,
-            sliding      = $i_slide:ident,
-            sentence     = $i_sentence:ident,
-            page_aware   = $i_page:ident,
         },
         images = {
             structural   = $g_struct:ident,
@@ -146,6 +102,9 @@ macro_rules! bind_per_mode_format {
             Ok((chunks_to_pylist(py, &chunks)?, images_to_py(py, images)))
         }
 
+        /// Materialised chunks for a stream entry point — used by whichever
+        /// stream macro this format pairs with.
+        #[allow(dead_code)]
         fn __chunks_for(
             file_path: &str,
             mode: &str,
@@ -164,10 +123,6 @@ macro_rules! bind_per_mode_format {
             )
             .map_err(to_py_err)
         }
-
-        $crate::__per_mode_iterators!(
-            $i_struct, $i_section, $i_semantic, $i_slide, $i_sentence, $i_page,
-        );
 
         // ---- chunkers -------------------------------------------------------
 
@@ -207,50 +162,6 @@ macro_rules! bind_per_mode_format {
             paragraphs_per_page: usize,
         ) -> PyResult<PyObject> {
             __run_mode(py, file_path, "page_aware", 3, 1, 3, paragraphs_per_page)
-        }
-
-        // ---- streams --------------------------------------------------------
-
-        #[pyfunction]
-        fn $s_struct(py: Python<'_>, file_path: &str) -> PyResult<$i_struct> {
-            $i_struct::build(py, &__chunks_for(file_path, "structural", 3, 1, 3, 15)?)
-        }
-        #[pyfunction]
-        fn $s_section(py: Python<'_>, file_path: &str) -> PyResult<$i_section> {
-            $i_section::build(py, &__chunks_for(file_path, "section", 3, 1, 3, 15)?)
-        }
-        #[pyfunction]
-        fn $s_semantic(py: Python<'_>, file_path: &str) -> PyResult<$i_semantic> {
-            $i_semantic::build(py, &__chunks_for(file_path, "semantic", 3, 1, 3, 15)?)
-        }
-        #[pyfunction]
-        fn $s_slide(
-            py: Python<'_>,
-            file_path: &str,
-            window_size: usize,
-            overlap: usize,
-        ) -> PyResult<$i_slide> {
-            let chunks =
-                __chunks_for(file_path, "sliding_window", window_size, overlap, 3, 15)?;
-            $i_slide::build(py, &chunks)
-        }
-        #[pyfunction]
-        fn $s_sentence(
-            py: Python<'_>,
-            file_path: &str,
-            sentences_per_chunk: usize,
-        ) -> PyResult<$i_sentence> {
-            let chunks = __chunks_for(file_path, "sentence", 3, 1, sentences_per_chunk, 15)?;
-            $i_sentence::build(py, &chunks)
-        }
-        #[pyfunction]
-        fn $s_page(
-            py: Python<'_>,
-            file_path: &str,
-            paragraphs_per_page: usize,
-        ) -> PyResult<$i_page> {
-            let chunks = __chunks_for(file_path, "page_aware", 3, 1, 3, paragraphs_per_page)?;
-            $i_page::build(py, &chunks)
         }
 
         // ---- images ---------------------------------------------------------
@@ -309,27 +220,13 @@ macro_rules! bind_per_mode_format {
             Ok((md, images_to_py(py, images)))
         }
 
-        pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        pub fn register_chunkers(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_function(wrap_pyfunction!($f_struct, m)?)?;
             m.add_function(wrap_pyfunction!($f_section, m)?)?;
             m.add_function(wrap_pyfunction!($f_semantic, m)?)?;
             m.add_function(wrap_pyfunction!($f_slide, m)?)?;
             m.add_function(wrap_pyfunction!($f_sentence, m)?)?;
             m.add_function(wrap_pyfunction!($f_page, m)?)?;
-
-            m.add_function(wrap_pyfunction!($s_struct, m)?)?;
-            m.add_function(wrap_pyfunction!($s_section, m)?)?;
-            m.add_function(wrap_pyfunction!($s_semantic, m)?)?;
-            m.add_function(wrap_pyfunction!($s_slide, m)?)?;
-            m.add_function(wrap_pyfunction!($s_sentence, m)?)?;
-            m.add_function(wrap_pyfunction!($s_page, m)?)?;
-
-            m.add_class::<$i_struct>()?;
-            m.add_class::<$i_section>()?;
-            m.add_class::<$i_semantic>()?;
-            m.add_class::<$i_slide>()?;
-            m.add_class::<$i_sentence>()?;
-            m.add_class::<$i_page>()?;
             Ok(())
         }
 
@@ -346,6 +243,43 @@ macro_rules! bind_per_mode_format {
         pub fn register_markdown(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m.add_function(wrap_pyfunction!($f_md, m)?)?;
             m.add_function(wrap_pyfunction!($f_mdi, m)?)?;
+            Ok(())
+        }
+    };
+}
+
+/// The `.doc` / `.ppt` / `.docx` shape: core plus six per-mode stream entry
+/// points, each returning its own iterator class.
+///
+/// `register` covers chunkers *and* streams, so those formats' `mod.rs` calls
+/// `register` / `register_images` / `register_markdown` and nothing else.
+#[macro_export]
+macro_rules! bind_per_mode_format {
+    (
+        engine = $eng:path,
+        chunkers = { $($chunkers:tt)* },
+        streams = { $($streams:tt)* },
+        iterators = { $($iterators:tt)* },
+        images = { $($images:tt)* },
+        to_markdown             = $f_md:ident,
+        to_markdown_with_images = $f_mdi:ident,
+    ) => {
+        $crate::bind_per_mode_core! {
+            engine = $eng,
+            chunkers = { $($chunkers)* },
+            images = { $($images)* },
+            to_markdown             = $f_md,
+            to_markdown_with_images = $f_mdi,
+        }
+
+        $crate::bind_per_mode_streams! {
+            streams = { $($streams)* },
+            iterators = { $($iterators)* },
+        }
+
+        pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            register_chunkers(m)?;
+            register_streams(m)?;
             Ok(())
         }
     };
