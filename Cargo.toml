@@ -18,23 +18,11 @@ extension-module = ["pyo3/extension-module"]
 rs-chunks = { path = "crates/rs-chunks", default-features = false, features = ["pdf-native"] }
 pyo3 = { version = "0.22" }
 pythonize = "0.22"
-quick-xml = "0.38"
-serde_json = "1"
-zip = "2"
-calamine = { version = "0.26", features = ["dates"] }
-csv = "1"
-encoding_rs = "0.8"
-cfb = "0.10"
-base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
-# PDF → markdown via liteparse (heuristic, model-free). OCR/ML features disabled;
-# we use only the core spatial-layout markdown path. Async, bridged via a
-# current-thread tokio runtime.
-liteparse = { version = "=2.9.0", default-features = false }
-tokio = { version = "1", features = ["rt"] }
-# RTF → text for the .msg RTF-body fallback (MIT, minimal deps). Empirically
-# vetted on real Outlook encapsulated-HTML RTF.
-rtf-parser = "0.4"
-# MIME email (.eml/.mbox) parser: RFC5322/2047, MIME, base64/QP, charsets.
-# MIT/Apache. Lean tree (only `hashify` + our existing encoding_rs).
-mail-parser = { version = "0.11", default-features = false, features = ["full_encoding"] }
+
+# Nothing else. Every parser this package used to name directly — quick-xml,
+# zip, calamine, csv, encoding_rs, cfb, base64, image, liteparse, tokio,
+# rtf-parser, mail-parser, serde_json — belonged to the engine fork that lived
+# in src/extensions/. The fork is gone (CONSOLIDATION_PLAN.md Phase 3), so those
+# crates are the vendored engine's dependencies now, declared in its own
+# Cargo.toml and pulled in transitively. Re-adding one here means engine logic
+# has crept back into the binding: fix that instead.

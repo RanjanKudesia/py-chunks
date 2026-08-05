@@ -1,25 +1,12 @@
-pub mod common;
-pub mod images;
-pub mod repair;
-pub mod page_aware;
-pub mod row_document;
-pub mod semantic;
-pub mod sheet;
-pub mod sliding_window;
-pub mod stream_iter;
-pub mod table_region;
-pub mod to_markdown;
-pub mod with_images;
+//! Spreadsheet support (`.xlsx` / `.xls` / `.xlsm` / `.xlsb` / `.ods` /
+//! `.xltx` / `.xltm`).
+//!
+//! **Migrated to the vendored engine** (`chunks_rs::formats::xlsx`); this module
+//! is the PyO3 binding only. See CONSOLIDATION_PLAN.md.
+
+pub mod chunkers;
 
 pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
-    page_aware::register(m)?;
-    row_document::register(m)?;
-    semantic::register(m)?;
-    sheet::register(m)?;
-    sliding_window::register(m)?;
-    table_region::register(m)?;
-    stream_iter::register(m)?;
-    to_markdown::register(m)?;
-    with_images::register(m)?;
+    chunkers::register(m)?;
     Ok(())
 }

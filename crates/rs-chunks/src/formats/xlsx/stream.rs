@@ -1,41 +1,33 @@
-/// Real streaming iterator for all XLSX chunking modes.
-///
-/// Memory profile by mode:
-///   row / sliding_window — true state machines: O(parsed_rows) for the
-///     pre-parsed SheetData; only one XlsxChunkRecord is built per __next__.
-///   table / sheet / page_aware / semantic — batch-drain: all chunks are
-///     built upfront (global analysis required), then converted to Python
-///     dicts lazily one per __next__.
-///
-/// Parity guarantee: yields identical content and metadata to the
-/// corresponding batch function for every mode.
+//! Incremental streaming for spreadsheet chunking.
+//!
+//! `row` and `sliding_window` are genuine state machines: the workbook is
+//! parsed once into [`SheetData`], then **one** [`XlsxChunkRecord`] is built per
+//! `next()`. The other four modes (`table`, `sheet`, `page_aware`, `semantic`)
+//! need global analysis of the whole sheet before any chunk is correct, so they
+//! batch-drain — all chunks built up front, yielded one at a time.
+//!
+//! **Parity guarantee:** every mode yields byte-identical content and metadata
+//! to the corresponding batch builder. `stream_matches_batch_for_every_mode` in
+//! `tests/xlsx_stream.rs` asserts exactly that over the fixture corpus, because
+//! the two produce their chunks by completely different code paths and nothing
+//! else would catch them drifting.
+//!
+//! This is the only genuinely lazy chunking path in the engine. It lived in
+//! py_chunks' binding until 2026-08-05, which meant one of three SDKs had it by
+//! accident; moving it here gives all three the same behaviour (see
+//! CONSOLIDATION_PLAN.md "DECIDED 2026-08-05").
+
 use calamine::{Data, Reader};
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule};
-use pyo3::wrap_pyfunction;
-use pythonize::pythonize;
 use serde_json::json;
 
+use crate::chunk::Chunk;
+use crate::error::{ChunkError, Result};
+
 use super::common::{
-    cell_to_string, detect_header_row, row_is_empty_public, serialize_row_kv,
-    serialize_row_values_public, XlsxChunkRecord, CT_ROW, CT_SLIDING_WINDOW,
+    cell_to_string, detect_header_row, open_spreadsheet_from_bytes, read_worksheet_range,
+    row_is_empty_public, serialize_row_kv, serialize_row_values_public, XlsxChunkRecord, CT_ROW,
+    CT_SLIDING_WINDOW,
 };
-use super::page_aware::build_page_aware_chunks;
-use super::row_document::map_build_error;
-use super::semantic::build_semantic_chunks;
-use super::sheet::build_sheet_chunks;
-use super::table_region::build_table_chunks;
-
-// ── Chunk → Python dict ───────────────────────────────────────────────────────
-
-fn chunk_to_pydict(py: Python<'_>, chunk: &XlsxChunkRecord) -> PyResult<PyObject> {
-    let dict = PyDict::new_bound(py);
-    dict.set_item("content", &chunk.content)?;
-    dict.set_item("content_type", &chunk.content_type)?;
-    dict.set_item("metadata", pythonize(py, &chunk.metadata)?)?;
-    Ok(dict.into_any().unbind())
-}
 
 // ── Pre-parsed sheet data (row / sliding_window state machines) ───────────────
 
@@ -75,15 +67,15 @@ fn build_headers_from_rows(
         .collect()
 }
 
-/// Open the workbook once and collect all row data per sheet.
-/// Used by row and sliding_window state machines.
+/// Open the workbook once and collect all row data per sheet. Shared by the
+/// `row` and `sliding_window` state machines.
 fn parse_sheets_for_streaming(
-    file_path: &str,
+    data: &[u8],
+    ext: &str,
     sheet_names: Vec<String>,
     skip_empty_rows: bool,
-) -> Result<(Vec<SheetData>, Vec<String>), String> {
-    let mut workbook =
-        super::common::open_spreadsheet(file_path)?;
+) -> std::result::Result<(Vec<SheetData>, Vec<String>), String> {
+    let mut workbook = open_spreadsheet_from_bytes(data, ext)?;
 
     let workbook_sheet_names = workbook.sheet_names().to_vec();
     let selected_sheets = if sheet_names.is_empty() {
@@ -111,7 +103,7 @@ fn parse_sheets_for_streaming(
 
         // A sheet calamine cannot read (chart sheets, XLM macro sheets) must not
         // take the whole workbook down with it — skip it and keep going.
-        let range = match super::common::read_worksheet_range(&mut workbook, &sheet_name) {
+        let range = match read_worksheet_range(&mut workbook, &sheet_name) {
             Ok(range) => {
                 readable_sheets += 1;
                 range
@@ -361,70 +353,73 @@ impl SlidingWindowStreamState {
 // ── Batch-drain (table / sheet / page_aware / semantic) ───────────────────────
 
 struct BatchDrainState {
-    chunks: Vec<XlsxChunkRecord>,
-    index: usize,
+    chunks: std::vec::IntoIter<XlsxChunkRecord>,
 }
 
-impl BatchDrainState {
-    fn new(chunks: Vec<XlsxChunkRecord>) -> Self {
-        BatchDrainState { chunks, index: 0 }
-    }
+// ── Backend ───────────────────────────────────────────────────────────────────
 
-    fn advance(&mut self) -> Option<&XlsxChunkRecord> {
-        if self.index >= self.chunks.len() {
-            return None;
-        }
-        let c = &self.chunks[self.index];
-        self.index += 1;
-        Some(c)
-    }
-}
-
-// ── Backend enum ──────────────────────────────────────────────────────────────
-
-enum XlsxStreamBackend {
-    Row(RowStreamState),
-    SlidingWindow(SlidingWindowStreamState),
+enum Backend {
+    Row(Box<RowStreamState>),
+    SlidingWindow(Box<SlidingWindowStreamState>),
     Batch(BatchDrainState),
 }
 
-// ── Iterator pyclass ──────────────────────────────────────────────────────────
-
-#[pyclass]
-pub struct XlsxStreamIterator {
-    backend: XlsxStreamBackend,
+/// Lazy iterator over spreadsheet chunks. See the module docs for which modes
+/// are incremental and which batch-drain.
+pub struct XlsxChunkStream {
+    backend: Backend,
 }
 
-#[pymethods]
-impl XlsxStreamIterator {
-    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
-        slf
-    }
+impl Iterator for XlsxChunkStream {
+    type Item = Result<Chunk>;
 
-    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        match &mut self.backend {
-            XlsxStreamBackend::Row(s) => match s.advance() {
-                None => Ok(None),
-                Some(chunk) => chunk_to_pydict(py, &chunk).map(Some),
-            },
-            XlsxStreamBackend::SlidingWindow(s) => match s.advance() {
-                None => Ok(None),
-                Some(chunk) => chunk_to_pydict(py, &chunk).map(Some),
-            },
-            XlsxStreamBackend::Batch(s) => match s.advance() {
-                None => Ok(None),
-                Some(chunk) => chunk_to_pydict(py, chunk).map(Some),
-            },
-        }
+    fn next(&mut self) -> Option<Self::Item> {
+        let record = match &mut self.backend {
+            Backend::Row(s) => s.advance(),
+            Backend::SlidingWindow(s) => s.advance(),
+            Backend::Batch(s) => s.chunks.next(),
+        }?;
+        Some(Ok(Chunk::new(
+            record.content,
+            record.content_type,
+            record.metadata,
+        )))
     }
 }
 
-// ── Public factory function ───────────────────────────────────────────────────
+/// Reject the argument combinations a mode cannot use. Mirrors the batch
+/// entry points so streaming and batch refuse the same inputs.
+fn validate(mode: &str, rows_per_chunk: usize, max_chunk_chars: usize) -> Result<()> {
+    if matches!(mode, "row" | "default" | "semantic") && rows_per_chunk < 1 {
+        return Err(ChunkError::InvalidArg(
+            "rows_per_chunk must be greater than 0".into(),
+        ));
+    }
+    if matches!(mode, "table" | "sheet" | "page_aware") && max_chunk_chars < 1 {
+        return Err(ChunkError::InvalidArg(
+            "max_chunk_chars must be greater than 0".into(),
+        ));
+    }
+    Ok(())
+}
 
-#[pyfunction]
-pub fn stream_xlsx_chunks(
-    py: Python<'_>,
-    file_path: &str,
+/// `Sheet '…' not found` is a caller error; anything else is a parse failure.
+/// The distinction is part of the published contract (py_chunks maps the first
+/// to `ValueError` and the second to `RuntimeError`).
+pub(super) fn build_err(err: String) -> ChunkError {
+    if err.starts_with("Sheet '") && err.ends_with("' not found") {
+        ChunkError::InvalidArg(err)
+    } else {
+        ChunkError::Parse(err)
+    }
+}
+
+/// Build a lazy chunk stream from spreadsheet bytes. `ext` (e.g. `"xlsx"`,
+/// `"ods"`) routes calamine's format detection and the ODS mimetype repair.
+#[allow(clippy::too_many_arguments)]
+pub fn stream_from_bytes(
+    data: &[u8],
+    ext: &str,
     mode: &str,
     rows_per_chunk: usize,
     window_size: usize,
@@ -433,27 +428,15 @@ pub fn stream_xlsx_chunks(
     sheet_names: Vec<String>,
     skip_empty_rows: bool,
     max_chunk_chars: usize,
-) -> PyResult<Py<XlsxStreamIterator>> {
-    if !super::common::is_supported_spreadsheet(file_path) {
-        return Err(PyValueError::new_err(format!(
-            "Expected a spreadsheet file ({}), got: {file_path}",
-            super::common::supported_spreadsheet_exts_display()
-        )));
-    }
-    if (mode == "row" || mode == "semantic") && rows_per_chunk == 0 {
-        return Err(PyValueError::new_err("rows_per_chunk must be > 0"));
-    }
-    if matches!(mode, "table" | "sheet" | "page_aware") && max_chunk_chars == 0 {
-        return Err(PyValueError::new_err("max_chunk_chars must be > 0"));
-    }
+) -> Result<XlsxChunkStream> {
+    validate(mode, rows_per_chunk, max_chunk_chars)?;
 
     let backend = match mode {
-        "row" => {
-            let sheets =
-                parse_sheets_for_streaming(file_path, sheet_names, skip_empty_rows)
-                    .map_err(map_build_error)?;
-            let (sheets, skipped_sheets) = sheets;
-            XlsxStreamBackend::Row(RowStreamState {
+        "row" | "default" => {
+            let (sheets, skipped_sheets) =
+                parse_sheets_for_streaming(data, ext, sheet_names, skip_empty_rows)
+                    .map_err(build_err)?;
+            Backend::Row(Box::new(RowStreamState {
                 sheets,
                 skipped_sheets,
                 sheet_idx: 0,
@@ -461,20 +444,21 @@ pub fn stream_xlsx_chunks(
                 rows_per_chunk,
                 include_headers,
                 chunk_index: 0,
-            })
+            }))
         }
         "sliding_window" => {
-            if window_size == 0 {
-                return Err(PyValueError::new_err("window_size must be >= 1"));
+            if window_size < 1 {
+                return Err(ChunkError::InvalidArg("window_size must be >= 1".into()));
             }
             if overlap >= window_size {
-                return Err(PyValueError::new_err("overlap must be < window_size"));
+                return Err(ChunkError::InvalidArg(
+                    "overlap must be less than window_size".into(),
+                ));
             }
-            let sheets =
-                parse_sheets_for_streaming(file_path, sheet_names, skip_empty_rows)
-                    .map_err(map_build_error)?;
-            let (sheets, skipped_sheets) = sheets;
-            XlsxStreamBackend::SlidingWindow(SlidingWindowStreamState {
+            let (sheets, skipped_sheets) =
+                parse_sheets_for_streaming(data, ext, sheet_names, skip_empty_rows)
+                    .map_err(build_err)?;
+            Backend::SlidingWindow(Box::new(SlidingWindowStreamState {
                 sheets,
                 skipped_sheets,
                 sheet_idx: 0,
@@ -484,64 +468,42 @@ pub fn stream_xlsx_chunks(
                 overlap,
                 include_headers,
                 chunk_index: 0,
-            })
+            }))
         }
-        "table" => {
-            let chunks = build_table_chunks(
-                file_path,
-                include_headers,
-                sheet_names,
-                skip_empty_rows,
-                max_chunk_chars,
+        "table" => Backend::Batch(BatchDrainState {
+            chunks: super::table_region::build_table_chunks(
+                data, ext, include_headers, sheet_names, skip_empty_rows, max_chunk_chars,
             )
-            .map_err(map_build_error)?;
-            XlsxStreamBackend::Batch(BatchDrainState::new(chunks))
-        }
-        "sheet" => {
-            let chunks = build_sheet_chunks(
-                file_path,
-                include_headers,
-                sheet_names,
-                skip_empty_rows,
-                max_chunk_chars,
+            .map_err(build_err)?
+            .into_iter(),
+        }),
+        "sheet" => Backend::Batch(BatchDrainState {
+            chunks: super::sheet::build_sheet_chunks(
+                data, ext, include_headers, sheet_names, skip_empty_rows, max_chunk_chars,
             )
-            .map_err(map_build_error)?;
-            XlsxStreamBackend::Batch(BatchDrainState::new(chunks))
-        }
-        "page_aware" => {
-            let chunks = build_page_aware_chunks(
-                file_path,
-                include_headers,
-                sheet_names,
-                skip_empty_rows,
-                max_chunk_chars,
+            .map_err(build_err)?
+            .into_iter(),
+        }),
+        "page_aware" => Backend::Batch(BatchDrainState {
+            chunks: super::page_aware::build_page_aware_chunks(
+                data, ext, include_headers, sheet_names, skip_empty_rows, max_chunk_chars,
             )
-            .map_err(map_build_error)?;
-            XlsxStreamBackend::Batch(BatchDrainState::new(chunks))
-        }
-        "semantic" => {
-            let chunks = build_semantic_chunks(
-                file_path,
-                rows_per_chunk,
-                include_headers,
-                sheet_names,
-                skip_empty_rows,
+            .map_err(build_err)?
+            .into_iter(),
+        }),
+        "semantic" => Backend::Batch(BatchDrainState {
+            chunks: super::semantic::build_semantic_chunks(
+                data, ext, rows_per_chunk, include_headers, sheet_names, skip_empty_rows,
             )
-            .map_err(map_build_error)?;
-            XlsxStreamBackend::Batch(BatchDrainState::new(chunks))
-        }
-        _ => {
-            return Err(PyValueError::new_err(format!(
-                "Unknown XLSX streaming mode: {mode}"
+            .map_err(build_err)?
+            .into_iter(),
+        }),
+        other => {
+            return Err(ChunkError::InvalidArg(format!(
+                "Unknown XLSX streaming mode: {other}"
             )))
         }
     };
 
-    Py::new(py, XlsxStreamIterator { backend })
-}
-
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<XlsxStreamIterator>()?;
-    m.add_function(wrap_pyfunction!(stream_xlsx_chunks, m)?)?;
-    Ok(())
+    Ok(XlsxChunkStream { backend })
 }
