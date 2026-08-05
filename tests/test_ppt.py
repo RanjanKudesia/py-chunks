@@ -70,6 +70,11 @@ def test_metadata_is_slide_aware(fp):
         "page_number",
         "slide_number",
         "slide_title",
+        # Slide titles are headings to the shared builders, so a deck gets the
+        # same section trail `.doc` gained in TECH_DEBT #12.
+        "section_heading",
+        "section_heading_level",
+        "heading_path",
         "document_metadata",
     }
     # Slides are real structure, unlike `.doc` pages: every chunk has one.
