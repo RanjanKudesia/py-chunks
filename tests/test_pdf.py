@@ -162,14 +162,19 @@ def test_pdf_table_content_is_preserved_across_modes(mode: str, table_pdf: Path)
 
     assert table_chunk is not None, f"Expected table content in mode={mode}"
     assert stream_table_chunk is not None, f"Expected streamed table content in mode={mode}"
-    assert "\n" in table_chunk["content"]
-    assert "\n" in stream_table_chunk["content"]
+    # `sentence` mode reflows blocks into sentences by definition, so it is the
+    # one mode that may join the rows onto a single line. Its own test below
+    # asserts the content survives. Every other mode keeps the row structure.
+    if mode != "sentence":
+        assert "\n" in table_chunk["content"]
+        assert "\n" in stream_table_chunk["content"]
 
 
 def test_pdf_table_content_survives_in_default_and_structural(table_pdf: Path):
-    # liteparse renders pipe-aligned text as a preformatted/code block; the
-    # markdown chunker preserves the tabular content verbatim. Formal `table`
-    # classification is not guaranteed by the liteparse pipeline.
+    # The fixture draws pipe-delimited *text*, not a laid-out table: there are no
+    # column gaps to recover, only literal `|` characters. The engine keeps the
+    # rows verbatim; formal `table` classification needs a delimiter row, which
+    # this content does not have (see TECH_DEBT #29).
     for mode in ("default", "structural"):
         chunks, _ = chunk_pdf(str(table_pdf), mode=mode)
         stream_chunks = list(stream_chunk_pdf(str(table_pdf), mode=mode))
