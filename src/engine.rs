@@ -71,14 +71,24 @@ where
     to_result_dict(py, &chunks, started)
 }
 
-/// A `__next__`-style iterator over already-materialised chunks.
+/// A `__next__`-style iterator over chunks.
 ///
-/// The engine's `stream` returns an iterator, but every format currently
-/// materialises it; this keeps the Python-visible behaviour identical while
-/// leaving room for a genuinely lazy engine iterator later.
+/// Each chunk is converted to a Python `dict` **when it is asked for**, not up
+/// front. On a 5,000-page PDF that is the difference between handing the caller
+/// 71,111 dicts before the first one is read and building them one at a time
+/// (TECH_DEBT #55).
+///
+/// The source is either a finished `Vec` — for formats whose engine has to
+/// parse everything before any chunk is correct — or a live engine iterator, so
+/// a format that genuinely streams is not flattened on the way through.
 #[pyclass]
 pub struct ChunkStreamIterator {
-    chunks: std::vec::IntoIter<PyObject>,
+    source: ChunkSource,
+}
+
+enum ChunkSource {
+    Ready(std::vec::IntoIter<Chunk>),
+    Engine(Box<dyn Iterator<Item = chunks_rs::error::Result<Chunk>> + Send>),
 }
 
 #[pymethods]
@@ -86,19 +96,33 @@ impl ChunkStreamIterator {
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
-    fn __next__(&mut self, _py: Python<'_>) -> Option<PyObject> {
-        self.chunks.next()
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let chunk = match &mut self.source {
+            ChunkSource::Ready(chunks) => chunks.next(),
+            ChunkSource::Engine(chunks) => match chunks.next() {
+                Some(Ok(chunk)) => Some(chunk),
+                // A lazily-parsed format reports a bad document here rather
+                // than at construction, because construction did not read it.
+                Some(Err(error)) => return Err(to_py_err(error)),
+                None => None,
+            },
+        };
+        chunk.map(|c| chunk_to_pydict(py, &c)).transpose()
     }
 }
 
 impl ChunkStreamIterator {
-    pub fn build(py: Python<'_>, chunks: &[Chunk]) -> PyResult<Py<ChunkStreamIterator>> {
-        Py::new(
-            py,
-            ChunkStreamIterator {
-                chunks: chunks_to_pylist(py, chunks)?.into_iter(),
-            },
-        )
+    /// Wrap chunks the engine has already produced.
+    pub fn build(py: Python<'_>, chunks: Vec<Chunk>) -> PyResult<Py<ChunkStreamIterator>> {
+        Py::new(py, ChunkStreamIterator { source: ChunkSource::Ready(chunks.into_iter()) })
+    }
+
+    /// Wrap a live engine iterator, so nothing is materialised on the way.
+    pub fn from_engine(
+        py: Python<'_>,
+        chunks: impl Iterator<Item = chunks_rs::error::Result<Chunk>> + Send + 'static,
+    ) -> PyResult<Py<ChunkStreamIterator>> {
+        Py::new(py, ChunkStreamIterator { source: ChunkSource::Engine(Box::new(chunks)) })
     }
 }
 
@@ -205,7 +229,11 @@ macro_rules! bind_format {
             sentences_per_chunk: usize,
             paragraphs_per_page: usize,
         ) -> PyResult<Py<ChunkStreamIterator>> {
-            let chunks = __engine::chunk(
+            // The engine's own iterator, not a materialised vector. For most
+            // formats `stream` chunks the document up front and returns a
+            // drainable iterator, so a bad file is still rejected here; PDF's
+            // is genuinely lazy and reports such a file on the first `next()`.
+            let chunks = __engine::stream(
                 file_path,
                 mode,
                 window_size,
@@ -214,7 +242,7 @@ macro_rules! bind_format {
                 paragraphs_per_page,
             )
             .map_err(to_py_err)?;
-            ChunkStreamIterator::build(py, &chunks)
+            ChunkStreamIterator::from_engine(py, chunks)
         }
 
         pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {

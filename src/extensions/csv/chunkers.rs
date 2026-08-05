@@ -113,7 +113,7 @@ fn stream_csv_chunks(
         skip_empty_rows,
     )
     .map_err(to_py_err)?;
-    ChunkStreamIterator::build(py, &chunks)
+    ChunkStreamIterator::build(py, chunks)
 }
 
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
