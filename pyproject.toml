@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.5.0"
+version = "0.6.0"
 description = "Rust-backed Python chunking library"
 requires-python = ">=3.9"
 # No runtime dependencies. The Rust engine ships compiled inside the wheel and
