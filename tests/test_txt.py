@@ -539,14 +539,35 @@ class TestTxtAllCapsHeuristic:
             "gutenberg_sherlock_scandal.txt"
         )
 
-    @pytest.mark.xfail(
-        reason="TECH_DEBT #33: the ALL-CAPS rule has no way to tell a heading "
-               "from a machine marker or a clause number. Now reproducible "
-               "against real text rather than a constructed example.",
-        strict=True,
-    )
     def test_machine_markers_are_not_headings(self):
+        """TECH_DEBT #33, fixed once #34's corpus made it reproducible.
+
+        These were a strict xfail until the rule was narrowed; the xfail turning
+        into an XPASS is what reported the fix.
+        """
         found = self._headings("gutenberg_moby_dick_frontmatter.txt")
-        assert "*** START OF THE PROJECT GUTENBERG EBOOK MOBY DICK; OR, THE WHALE ***" \
-            not in found
-        assert "1.F." not in found
+        for marker in (
+            "*** START OF THE PROJECT GUTENBERG EBOOK MOBY DICK; OR, THE WHALE ***",
+            "*** END OF THE PROJECT GUTENBERG EBOOK MOBY DICK; OR, THE WHALE ***",
+            "1.F.",
+            "MOBY-DICK;",
+        ):
+            assert marker not in found, f"{marker!r} is not a section heading"
+
+    def test_bare_numerals_above_a_title_are_not_headings(self):
+        """Sherlock prints `I.` on its own line above `A SCANDAL IN BOHEMIA`."""
+        found = self._headings("gutenberg_sherlock_scandal.txt")
+        assert "I." not in found
+        assert "A SCANDAL IN BOHEMIA" in found, "the real title must survive"
+
+    def test_the_narrowing_loses_no_genuine_heading(self):
+        """The 28 real headings the corpus contains all still classify.
+
+        The admonition blocklist #33 originally proposed would have failed this:
+        in adversarial_allcaps.txt, WARNING/NOTE/CAUTION genuinely are headings.
+        """
+        found = self._headings("adversarial_allcaps.txt")
+        for heading in ("OPERATIONS RUNBOOK", "INTRODUCTION", "WARNING", "NOTE",
+                        "CAUTION", "ESCALATION PATH", "APPENDIX A: GLOSSARY",
+                        "END OF RUNBOOK"):
+            assert heading in found, f"{heading!r} must stay a heading"
