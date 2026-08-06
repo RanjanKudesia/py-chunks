@@ -17,11 +17,10 @@ Rust core, not a stack of Python dependencies.
 pip install py-chunks
 ```
 
-**Python 3.9+.** The Rust engine ships compiled inside the wheel, and parses PDF
-itself. [`pypdfium2`](https://pypi.org/project/pypdfium2/) is installed
-automatically and supplies PDFium for one job only: rasterising a scanned PDF's
-pages when it carries no embedded page image. To use a custom PDFium build, set
-`PDFIUM_LIBRARY_PATH` before importing.
+**Python 3.9+, and no runtime dependencies.** The Rust engine ships compiled
+inside the wheel: it parses PDF itself, and vendors PDFium for the one job that
+needs a rasteriser — rendering a scanned PDF's pages when the file carries no
+embedded page image of its own.
 
 ## Quick start
 

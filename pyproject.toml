@@ -7,7 +7,11 @@ name = "py-chunks"
 version = "0.5.0"
 description = "Rust-backed Python chunking library"
 requires-python = ">=3.9"
-dependencies = ["pypdfium2"]
+# No runtime dependencies. The Rust engine ships compiled inside the wheel and
+# vendors PDFium through the `liteparse` crate for scanned-page rasterisation,
+# so `pypdfium2` was never imported by anything here (TECH_DEBT B3) — it was a
+# large binary wheel forced on every install for nothing.
+dependencies = []
 license = { text = "MIT" }
 readme = "README.md"
 keywords = ["chunking", "document", "pdf", "docx", "docm", "dotx", "dotm", "doc", "pptx", "potx", "potm", "ppsx", "ppsm", "xlsx", "xls", "xlsm", "xlsb", "ods", "xltx", "xltm", "csv", "tsv", "msg", "outlook", "rtf", "epub", "ebook", "ipynb", "jupyter", "eml", "mbox", "email", "mime", "odt", "odp", "opendocument", "libreoffice", "json", "jsonl", "ndjson", "markdown", "rust"]
