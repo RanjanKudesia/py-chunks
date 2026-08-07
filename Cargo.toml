@@ -1,7 +1,9 @@
 [package]
 name = "py_chunks"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
+# Keep stale local build artifacts (dist/ wheels) out of any packaged archive.
+exclude = ["/dist"]
 
 [lib]
 name = "py_chunks_rust"
@@ -16,7 +18,10 @@ extension-module = ["pyo3/extension-module"]
 # that tree: ../sync_engine.sh overwrites it from rs-chunks. See
 # CONSOLIDATION_PLAN.md.
 rs-chunks = { path = "crates/rs-chunks", default-features = false, features = ["pdf-native"] }
-pyo3 = { version = "0.22" }
+# abi3-py39: build one stable-ABI wheel per platform that covers CPython 3.9+
+# (matches `requires-python = ">=3.9"` in pyproject.toml) instead of a
+# cp313-only wheel per Python version.
+pyo3 = { version = "0.22", features = ["abi3-py39"] }
 pythonize = "0.22"
 
 # Nothing else. Every parser this package used to name directly — quick-xml,

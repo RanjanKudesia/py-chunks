@@ -1,5 +1,10 @@
 [MASTER]
 extension-pkg-allow-list=py_chunks._rust
+# _rust ships a .pyi stub (for mypy/pyright). astroid's stub inference
+# mis-models the pyo3 returns (dict/tuple annotations infer as
+# unsubscriptable), flooding the wrappers with false E1136/E0633 —
+# so pylint keeps treating _rust as opaque, exactly as before the stub.
+ignored-modules=py_chunks._rust
 
 [MESSAGES CONTROL]
 disable=
@@ -22,9 +27,9 @@ max-positional-arguments=11
 max-branches=18
 max-returns=17
 max-locals=20
-# __init__.py is the dispatcher plus the full typed public API and its
-# docstrings; it is long by design.
-max-module-lines=1700
+# _sources.py carries the 13 source-agnostic entry points with full docstrings
+# and explicit kwarg forwarding; it is the one deliberately long module.
+max-module-lines=1000
 
 [FORMAT]
 max-line-length=100

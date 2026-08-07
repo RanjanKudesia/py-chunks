@@ -18,20 +18,14 @@ _DOCX_MODES = {
 }
 
 
-def _validate_docx_args(
-    path: Path,
-    file_path: str,
+def _validate_docx_options(
     mode: str,
     window_size: int,
     overlap: int,
     sentences_per_chunk: int,
     paragraphs_per_page: int,
 ) -> str:
-    if not path.is_file():
-        raise FileNotFoundError(f"DOCX file not found: {file_path}")
-    if path.suffix.lower() not in _DOCX_SUFFIXES:
-        raise ValueError(
-            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
+    """Path-independent half of the validation — shared with the bytes route."""
     if mode not in _DOCX_MODES:
         raise ValueError(
             "mode must be 'default', 'structural', 'section', 'semantic', "
@@ -50,6 +44,25 @@ def _validate_docx_args(
         raise ValueError("paragraphs_per_page must be greater than 0")
 
     return normalized_mode
+
+
+def _validate_docx_args(
+    path: Path,
+    file_path: str,
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"DOCX file not found: {file_path}")
+    if path.suffix.lower() not in _DOCX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
+    return _validate_docx_options(
+        mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
+    )
 
 
 def _run_docx_mode(

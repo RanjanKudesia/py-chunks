@@ -10,13 +10,18 @@ _EPUB_MODES = {"default", "structural", "section", "semantic",
                "sliding_window", "sentence", "page_aware"}
 
 
+def _validate_mode(mode: str) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _EPUB_MODES:
+        raise ValueError(f"mode must be one of {sorted(_EPUB_MODES)} for EPUB, got: '{mode}'")
+
+
 def _validate(file_path: str, path: Path, mode: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"EPUB file not found: {file_path}")
     if path.suffix.lower() != ".epub":
         raise ValueError(f"Expected a .epub file, got: {file_path}")
-    if mode not in _EPUB_MODES:
-        raise ValueError(f"mode must be one of {sorted(_EPUB_MODES)} for EPUB, got: '{mode}'")
+    _validate_mode(mode)
 
 
 def chunk_epub(

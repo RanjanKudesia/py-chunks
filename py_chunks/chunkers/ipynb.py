@@ -10,13 +10,18 @@ _IPYNB_MODES = {"default", "structural", "section", "semantic",
                 "sliding_window", "sentence", "page_aware"}
 
 
+def _validate_mode(mode: str) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _IPYNB_MODES:
+        raise ValueError(f"mode must be one of {sorted(_IPYNB_MODES)} for ipynb, got: '{mode}'")
+
+
 def _validate(file_path: str, path: Path, mode: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"Notebook file not found: {file_path}")
     if path.suffix.lower() != ".ipynb":
         raise ValueError(f"Expected a .ipynb file, got: {file_path}")
-    if mode not in _IPYNB_MODES:
-        raise ValueError(f"mode must be one of {sorted(_IPYNB_MODES)} for ipynb, got: '{mode}'")
+    _validate_mode(mode)
 
 
 def chunk_ipynb(

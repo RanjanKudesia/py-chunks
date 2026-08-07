@@ -73,7 +73,7 @@ def test_get_markdown_pdf_list_images_false_returns_str():
     assert isinstance(result, str)
 
 
-@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.docx")
+@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing ../test_files/docx/all_round.docx")
 def test_docx_get_markdown_with_images_result_shape():
     result = get_markdown(str(DOCX_FIXTURE), list_images=True)
     assert isinstance(result, MarkdownResult)
@@ -82,7 +82,7 @@ def test_docx_get_markdown_with_images_result_shape():
     assert isinstance(result.images, dict)
 
 
-@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.docx")
+@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing ../test_files/docx/all_round.docx")
 def test_docx_image_keys_values_and_markdown_refs():
     result = get_markdown(str(DOCX_FIXTURE), list_images=True)
     pattern = re.compile(r"^[0-9a-f]{16}\.(png|jpg|jpeg|gif|webp)$")
@@ -95,13 +95,13 @@ def test_docx_image_keys_values_and_markdown_refs():
             assert f"![]({key})" in result.markdown
 
 
-@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.docx")
+@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing ../test_files/docx/all_round.docx")
 def test_docx_get_markdown_default_and_false_are_str():
     assert isinstance(get_markdown(str(DOCX_FIXTURE)), str)
     assert isinstance(get_markdown(str(DOCX_FIXTURE), list_images=False), str)
 
 
-@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.docx")
+@pytest.mark.skipif(not DOCX_FIXTURE.exists(), reason="Missing ../test_files/docx/all_round.docx")
 def test_docx_bytes_and_filelike_sources_with_images():
     data = DOCX_FIXTURE.read_bytes()
     from_bytes = get_markdown(data, filename=DOCX_FIXTURE.name, list_images=True)
@@ -112,7 +112,7 @@ def test_docx_bytes_and_filelike_sources_with_images():
     assert isinstance(from_file_obj, MarkdownResult)
 
 
-@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.pptx")
+@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing ../test_files/pptx/sample.pptx")
 def test_pptx_get_markdown_with_images_result_shape():
     result = get_markdown(str(PPTX_FIXTURE), list_images=True)
     assert isinstance(result, MarkdownResult)
@@ -121,7 +121,7 @@ def test_pptx_get_markdown_with_images_result_shape():
     assert isinstance(result.images, dict)
 
 
-@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.pptx")
+@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing ../test_files/pptx/sample.pptx")
 def test_pptx_image_keys_values_and_markdown_refs():
     result = get_markdown(str(PPTX_FIXTURE), list_images=True)
     pattern = re.compile(r"^[0-9a-f]{16}\.(png|jpg|jpeg|gif|webp)$")
@@ -134,13 +134,13 @@ def test_pptx_image_keys_values_and_markdown_refs():
             assert f"![]({key})" in result.markdown
 
 
-@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.pptx")
+@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing ../test_files/pptx/sample.pptx")
 def test_pptx_get_markdown_default_and_false_are_str():
     assert isinstance(get_markdown(str(PPTX_FIXTURE)), str)
     assert isinstance(get_markdown(str(PPTX_FIXTURE), list_images=False), str)
 
 
-@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing tests/fixtures/sample.pptx")
+@pytest.mark.skipif(not PPTX_FIXTURE.exists(), reason="Missing ../test_files/pptx/sample.pptx")
 def test_pptx_bytes_and_filelike_sources_with_images():
     data = PPTX_FIXTURE.read_bytes()
     from_bytes = get_markdown(data, filename=PPTX_FIXTURE.name, list_images=True)

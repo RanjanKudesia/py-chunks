@@ -32,3 +32,8 @@ CLAUDE.md
 # PyPI ships wheels rather than this. Tracking it dirtied the tree after every
 # build and added 20 MB to history per commit that touched it. (#67)
 py_chunks/*.so
+
+# Stale local wheel output (release wheels are built in CI). Untracked 2026-08
+# (7.6MB of 0.4.x cp313 wheels was in git); also excluded from the crate
+# archive via Cargo.toml `exclude`.
+dist/

@@ -38,39 +38,39 @@ def test_doc_to_markdown_importable():
     assert callable(fn)
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_returns_string():
     result = doc_to_markdown(str(SAMPLE_DOC))
     assert isinstance(result, str)
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_not_empty():
     result = doc_to_markdown(str(SAMPLE_DOC))
     assert result.strip() != ""
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_no_trailing_whitespace():
     result = doc_to_markdown(str(SAMPLE_DOC))
     assert result == result.strip()
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_via_get_markdown():
     direct = doc_to_markdown(str(SAMPLE_DOC))
     via_api = get_markdown(str(SAMPLE_DOC))
     assert via_api == direct
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_headings_use_hash():
     result = doc_to_markdown(str(SAMPLE_DOC))
     if any(marker in result for marker in ["# ", "## ", "### "]):
         assert True
 
 
-@pytest.mark.skipif(not HAS_SAMPLE, reason="No tests/fixtures/sample.doc present")
+@pytest.mark.skipif(not HAS_SAMPLE, reason="No ../test_files/doc/sample.doc present")
 def test_doc_to_markdown_list_items_use_dash():
     result = doc_to_markdown(str(SAMPLE_DOC))
     if "\n- " in result or result.startswith("- "):

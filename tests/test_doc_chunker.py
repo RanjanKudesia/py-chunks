@@ -71,7 +71,7 @@ def test_get_chunks_from_path_dispatch_doc(tmp_path):
         get_chunks_from_path(str(f))
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_default_returns_list(doc_path):
     chunks, timing = chunk_doc(str(doc_path))
@@ -79,7 +79,7 @@ def test_chunk_doc_default_returns_list(doc_path):
     assert len(chunks) > 0
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_chunk_shape(doc_path):
     chunks, timing = chunk_doc(str(doc_path))
@@ -90,7 +90,7 @@ def test_chunk_doc_chunk_shape(doc_path):
         assert isinstance(c["content"], str)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_timing_keys(doc_path):
     _, timing = chunk_doc(str(doc_path))
@@ -98,42 +98,42 @@ def test_chunk_doc_timing_keys(doc_path):
     assert "python_ms" in timing
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_section_mode(doc_path):
     chunks, _ = chunk_doc(str(doc_path), mode="section")
     assert isinstance(chunks, list)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_semantic_mode(doc_path):
     chunks, _ = chunk_doc(str(doc_path), mode="semantic")
     assert isinstance(chunks, list)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_sliding_window_mode(doc_path):
     chunks, _ = chunk_doc(str(doc_path), mode="sliding_window", window_size=3, overlap=1)
     assert isinstance(chunks, list)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_sentence_mode(doc_path):
     chunks, _ = chunk_doc(str(doc_path), mode="sentence", sentences_per_chunk=3)
     assert isinstance(chunks, list)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_chunk_doc_page_aware_mode(doc_path):
     chunks, _ = chunk_doc(str(doc_path), mode="page_aware", paragraphs_per_page=10)
     assert isinstance(chunks, list)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_stream_chunk_doc_default(doc_path):
     it = stream_chunk_doc(str(doc_path))
@@ -142,7 +142,7 @@ def test_stream_chunk_doc_default(doc_path):
     assert all("content" in c for c in chunks)
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_stream_matches_batch(doc_path):
     batch, _ = chunk_doc(str(doc_path))
@@ -152,7 +152,7 @@ def test_stream_matches_batch(doc_path):
         assert b["content"] == s["content"]
 
 
-@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in tests/fixtures/")
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
 @pytest.mark.parametrize("doc_path", doc_files())
 def test_no_oversized_chunks_and_no_nul(doc_path):
     """Regression: a paragraph with no breaks (e.g. examplefile.com's padded

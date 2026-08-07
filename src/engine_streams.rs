@@ -75,15 +75,15 @@ macro_rules! bind_per_mode_streams {
 
         #[pyfunction]
         fn $s_struct(py: Python<'_>, file_path: &str) -> PyResult<$i_struct> {
-            $i_struct::build(py, &__chunks_for(file_path, "structural", 3, 1, 3, 15)?)
+            $i_struct::build(py, &__chunks_for(py, file_path, "structural", 3, 1, 3, 15)?)
         }
         #[pyfunction]
         fn $s_section(py: Python<'_>, file_path: &str) -> PyResult<$i_section> {
-            $i_section::build(py, &__chunks_for(file_path, "section", 3, 1, 3, 15)?)
+            $i_section::build(py, &__chunks_for(py, file_path, "section", 3, 1, 3, 15)?)
         }
         #[pyfunction]
         fn $s_semantic(py: Python<'_>, file_path: &str) -> PyResult<$i_semantic> {
-            $i_semantic::build(py, &__chunks_for(file_path, "semantic", 3, 1, 3, 15)?)
+            $i_semantic::build(py, &__chunks_for(py, file_path, "semantic", 3, 1, 3, 15)?)
         }
         #[pyfunction]
         fn $s_slide(
@@ -92,7 +92,8 @@ macro_rules! bind_per_mode_streams {
             window_size: usize,
             overlap: usize,
         ) -> PyResult<$i_slide> {
-            let chunks = __chunks_for(file_path, "sliding_window", window_size, overlap, 3, 15)?;
+            let chunks =
+                __chunks_for(py, file_path, "sliding_window", window_size, overlap, 3, 15)?;
             $i_slide::build(py, &chunks)
         }
         #[pyfunction]
@@ -101,7 +102,7 @@ macro_rules! bind_per_mode_streams {
             file_path: &str,
             sentences_per_chunk: usize,
         ) -> PyResult<$i_sentence> {
-            let chunks = __chunks_for(file_path, "sentence", 3, 1, sentences_per_chunk, 15)?;
+            let chunks = __chunks_for(py, file_path, "sentence", 3, 1, sentences_per_chunk, 15)?;
             $i_sentence::build(py, &chunks)
         }
         #[pyfunction]
@@ -110,7 +111,8 @@ macro_rules! bind_per_mode_streams {
             file_path: &str,
             paragraphs_per_page: usize,
         ) -> PyResult<$i_page> {
-            let chunks = __chunks_for(file_path, "page_aware", 3, 1, 3, paragraphs_per_page)?;
+            let chunks =
+                __chunks_for(py, file_path, "page_aware", 3, 1, 3, paragraphs_per_page)?;
             $i_page::build(py, &chunks)
         }
 
@@ -159,6 +161,7 @@ macro_rules! bind_single_stream {
             paragraphs_per_page: usize,
         ) -> PyResult<$i_cls> {
             let chunks = __chunks_for(
+                py,
                 file_path,
                 mode,
                 window_size,

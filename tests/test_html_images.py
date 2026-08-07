@@ -7,7 +7,7 @@ import pytest
 
 from py_chunks import ChunksResult, MarkdownResult, get_chunks, get_markdown
 
-HTML_FIXTURE = Path("../test_files/html/sample_with_image.html")
+HTML_FIXTURE = Path(__file__).resolve().parents[2] / "test_files" / "html" / "sample_with_image.html"
 IMAGE_KEY_PATTERN = re.compile(r"^[0-9a-f]{16}\.(png|jpg|jpeg|gif|webp)$")
 
 _FIXTURE_EXISTS = HTML_FIXTURE.exists()

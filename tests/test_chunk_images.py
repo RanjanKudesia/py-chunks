@@ -7,14 +7,15 @@ import pytest
 
 from py_chunks import ChunksResult, get_chunks
 
-DOCX = Path("../test_files/docx/all_round.docx")
-PPTX = Path("../test_files/pptx/sample.pptx")
+_TEST_FILES = Path(__file__).resolve().parents[2] / "test_files"
+DOCX = _TEST_FILES / "docx" / "all_round.docx"
+PPTX = _TEST_FILES / "pptx" / "sample.pptx"
 IMAGE_KEY_PATTERN = re.compile(r"^[0-9a-f]{16}\.(png|jpg|jpeg|gif|webp)$")
 
 _FIXTURE_EXISTS = DOCX.exists()
 _PPTX_FIXTURE_EXISTS = PPTX.exists()
 _SKIP_NO_PPTX = pytest.mark.skipif(
-    not _PPTX_FIXTURE_EXISTS, reason="Missing test fixture: ../test_files/pptx/sample.pptx"
+    not _PPTX_FIXTURE_EXISTS, reason=f"Missing test fixture: {PPTX}"
 )
 
 _ALL_PPTX_MODES = [

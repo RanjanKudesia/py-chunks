@@ -16,6 +16,28 @@ _PPT_MODES = {
 }
 
 
+def _validate_ppt_options(
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _PPT_MODES:
+        raise ValueError(f"mode must be one of {sorted(_PPT_MODES)}")
+    normalized = "structural" if mode == "default" else mode
+    if normalized == "sliding_window":
+        if window_size <= 0:
+            raise ValueError("window_size must be > 0")
+        if overlap >= window_size:
+            raise ValueError("overlap must be less than window_size")
+    if normalized == "sentence" and sentences_per_chunk <= 0:
+        raise ValueError("sentences_per_chunk must be > 0")
+    if normalized == "page_aware" and paragraphs_per_page <= 0:
+        raise ValueError("paragraphs_per_page must be > 0")
+
+
 def chunk_ppt(
     file_path: str,
     mode: str = "default",
@@ -30,20 +52,9 @@ def chunk_ppt(
         raise FileNotFoundError(f"PPT file not found: {file_path}")
     if path.suffix.lower() != ".ppt":
         raise ValueError(f"Expected a .ppt file, got: {file_path}")
-    if mode not in _PPT_MODES:
-        raise ValueError(f"mode must be one of {sorted(_PPT_MODES)}")
+    _validate_ppt_options(mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page)
 
     normalized = "structural" if mode == "default" else mode
-
-    if normalized == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be > 0")
-        if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
-    if normalized == "sentence" and sentences_per_chunk <= 0:
-        raise ValueError("sentences_per_chunk must be > 0")
-    if normalized == "page_aware" and paragraphs_per_page <= 0:
-        raise ValueError("paragraphs_per_page must be > 0")
 
     py_start = time.perf_counter()
     path_str = str(path)

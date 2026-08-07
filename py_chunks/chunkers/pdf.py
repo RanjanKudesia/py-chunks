@@ -16,19 +16,14 @@ _SUPPORTED_MODES = {
 }
 
 
-def _validate_pdf_args(
-    path: Path,
-    file_path: str,
+def _validate_pdf_options(
     mode: str,
     window_size: int,
     overlap: int,
     sentences_per_chunk: int,
     paragraphs_per_page: int,
 ) -> None:
-    if not path.is_file():
-        raise FileNotFoundError(f"PDF file not found: {file_path}")
-    if path.suffix.lower() != ".pdf":
-        raise ValueError(f"Expected a .pdf file, got: {file_path}")
+    """Path-independent half of the validation — shared with the bytes route."""
     if mode not in _SUPPORTED_MODES:
         raise ValueError(
             "mode must be 'default', 'structural', 'section', 'semantic', "
@@ -42,6 +37,22 @@ def _validate_pdf_args(
         raise ValueError("sentences_per_chunk must be greater than 0")
     if mode == "page_aware" and paragraphs_per_page <= 0:
         raise ValueError("paragraphs_per_page must be greater than 0")
+
+
+def _validate_pdf_args(
+    path: Path,
+    file_path: str,
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"PDF file not found: {file_path}")
+    if path.suffix.lower() != ".pdf":
+        raise ValueError(f"Expected a .pdf file, got: {file_path}")
+    _validate_pdf_options(mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page)
 
 
 def _run_pdf_mode(

@@ -12,6 +12,29 @@ _MD_MODES = {
 _MD_STREAMING_MODES = _MD_MODES  # all modes support streaming
 
 
+def _validate_md_options(
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _MD_MODES:
+        raise ValueError(
+            f"mode must be one of {sorted(_MD_MODES)} for MD, got: '{mode}'"
+        )
+    if mode == "sliding_window":
+        if window_size <= 0:
+            raise ValueError("window_size must be greater than 0")
+        if overlap >= window_size:
+            raise ValueError("overlap must be less than window_size")
+    if mode == "sentence" and sentences_per_chunk <= 0:
+        raise ValueError("sentences_per_chunk must be greater than 0")
+    if mode == "page_aware" and paragraphs_per_page <= 0:
+        raise ValueError("paragraphs_per_page must be greater than 0")
+
+
 def chunk_md(
     file_path: str,
     mode: str = "default",
@@ -45,19 +68,7 @@ def chunk_md(
         raise FileNotFoundError(f"MD file not found: {file_path}")
     if path.suffix.lower() != ".md":
         raise ValueError(f"Expected a .md file, got: {file_path}")
-    if mode not in _MD_MODES:
-        raise ValueError(
-            f"mode must be one of {sorted(_MD_MODES)} for MD, got: '{mode}'"
-        )
-    if mode == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be greater than 0")
-        if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
-    if mode == "sentence" and sentences_per_chunk <= 0:
-        raise ValueError("sentences_per_chunk must be greater than 0")
-    if mode == "page_aware" and paragraphs_per_page <= 0:
-        raise ValueError("paragraphs_per_page must be greater than 0")
+    _validate_md_options(mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page)
 
     py_start = time.perf_counter()
     path_str = str(path)

@@ -116,8 +116,10 @@ chunks, timing = chunk_xlsx("data.xlsx", mode="row", rows_per_chunk=5)
 chunks, timing = chunk_csv("data.csv", mode="row", delimiter="\t")
 ```
 
-Modules: `pdf`, `docx`, `doc`, `pptx`, `ppt`, `html`, `md`, `txt`, `xlsx`
-(the whole spreadsheet family), `csv`.
+Modules: `csv`, `doc`, `docx` (the OOXML Word family), `eml` (also `.mbox`),
+`epub`, `html`, `ipynb`, `json` (also `.jsonl`/`.ndjson`), `md`, `msg`, `odf`
+(`.odt`/`.odp`), `pdf`, `ppt`, `pptx` (the OOXML PowerPoint family), `rtf`,
+`tsv`, `txt`, `xlsx` (the whole spreadsheet family).
 
 ## Errors
 

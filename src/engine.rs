@@ -20,11 +20,16 @@ use chunks_rs::error::ChunkError;
 /// raised for that situation. The mapping is part of the public contract:
 /// a bad extension is a `ValueError`, an unreadable file an `IOError`.
 pub fn to_py_err(e: ChunkError) -> PyErr {
+    #[allow(unreachable_patterns)]
     match e {
         ChunkError::InvalidArg(m) => PyValueError::new_err(m),
         ChunkError::Unsupported(m) => PyValueError::new_err(m),
         ChunkError::Io(e) => PyIOError::new_err(e.to_string()),
         ChunkError::Parse(m) => PyRuntimeError::new_err(m),
+        // `ChunkError` is becoming `#[non_exhaustive]` in the engine. Any
+        // variant added by a future engine sync maps to RuntimeError rather
+        // than breaking the build (the `allow` covers today's exhaustive enum).
+        other => PyRuntimeError::new_err(other.to_string()),
     }
 }
 
@@ -62,12 +67,16 @@ pub fn to_result_dict(py: Python<'_>, chunks: &[Chunk], started: Instant) -> PyR
 }
 
 /// Run an engine chunker and return the Python envelope, timing included.
+///
+/// The engine call runs with the GIL released (`allow_threads`), so a long
+/// parse no longer blocks every other Python thread; the closure touches only
+/// Rust data, and chunk→dict conversion happens after the GIL is reacquired.
 pub fn run<F>(py: Python<'_>, call: F) -> PyResult<PyObject>
 where
-    F: FnOnce() -> chunks_rs::error::Result<Vec<Chunk>>,
+    F: FnOnce() -> chunks_rs::error::Result<Vec<Chunk>> + Send,
 {
     let started = Instant::now();
-    let chunks = call().map_err(to_py_err)?;
+    let chunks = py.allow_threads(call).map_err(to_py_err)?;
     to_result_dict(py, &chunks, started)
 }
 
@@ -99,7 +108,9 @@ impl ChunkStreamIterator {
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
         let chunk = match &mut self.source {
             ChunkSource::Ready(chunks) => chunks.next(),
-            ChunkSource::Engine(chunks) => match chunks.next() {
+            // The engine-backed pull may parse (lazy formats); release the GIL
+            // for it. Conversion to a dict happens after reacquisition.
+            ChunkSource::Engine(chunks) => match py.allow_threads(|| chunks.next()) {
                 Some(Ok(chunk)) => Some(chunk),
                 // A lazily-parsed format reports a bad document here rather
                 // than at construction, because construction did not read it.
@@ -214,8 +225,8 @@ macro_rules! bind_format {
         }
 
         #[pyfunction]
-        fn $f_md(file_path: &str) -> PyResult<String> {
-            __engine::to_markdown(file_path).map_err(to_py_err)
+        fn $f_md(py: Python<'_>, file_path: &str) -> PyResult<String> {
+            py.allow_threads(|| __engine::to_markdown(file_path)).map_err(to_py_err)
         }
 
         #[pyfunction]
@@ -233,15 +244,19 @@ macro_rules! bind_format {
             // formats `stream` chunks the document up front and returns a
             // drainable iterator, so a bad file is still rejected here; PDF's
             // is genuinely lazy and reports such a file on the first `next()`.
-            let chunks = __engine::stream(
-                file_path,
-                mode,
-                window_size,
-                overlap,
-                sentences_per_chunk,
-                paragraphs_per_page,
-            )
-            .map_err(to_py_err)?;
+            // Construction may parse the whole document — GIL released.
+            let chunks = py
+                .allow_threads(|| {
+                    __engine::stream(
+                        file_path,
+                        mode,
+                        window_size,
+                        overlap,
+                        sentences_per_chunk,
+                        paragraphs_per_page,
+                    )
+                })
+                .map_err(to_py_err)?;
             ChunkStreamIterator::from_engine(py, chunks)
         }
 
@@ -288,15 +303,18 @@ macro_rules! bind_images {
             max_chunk_chars: usize,
         ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
             let _ = (rows_per_chunk, max_chunk_chars);
-            let (chunks, images) = __engine::chunk_with_images(
-                file_path,
-                mode,
-                window_size,
-                overlap,
-                sentences_per_chunk,
-                paragraphs_per_page,
-            )
-            .map_err($crate::engine::to_py_err)?;
+            let (chunks, images) = py
+                .allow_threads(|| {
+                    __engine::chunk_with_images(
+                        file_path,
+                        mode,
+                        window_size,
+                        overlap,
+                        sentences_per_chunk,
+                        paragraphs_per_page,
+                    )
+                })
+                .map_err($crate::engine::to_py_err)?;
             Ok((
                 $crate::engine::chunks_to_pylist(py, &chunks)?,
                 $crate::engine::images_to_py(py, images),
@@ -308,8 +326,9 @@ macro_rules! bind_images {
             py: Python<'_>,
             file_path: &str,
         ) -> PyResult<(String, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
-            let (md, images) =
-                __engine::to_markdown_with_images(file_path).map_err($crate::engine::to_py_err)?;
+            let (md, images) = py
+                .allow_threads(|| __engine::to_markdown_with_images(file_path))
+                .map_err($crate::engine::to_py_err)?;
             Ok((md, $crate::engine::images_to_py(py, images)))
         }
 
@@ -337,15 +356,18 @@ macro_rules! bind_images {
             sentences_per_chunk: usize,
             paragraphs_per_page: usize,
         ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
-            let (chunks, images) = __engine::chunk_with_images(
-                file_path,
-                mode,
-                window_size,
-                overlap,
-                sentences_per_chunk,
-                paragraphs_per_page,
-            )
-            .map_err($crate::engine::to_py_err)?;
+            let (chunks, images) = py
+                .allow_threads(|| {
+                    __engine::chunk_with_images(
+                        file_path,
+                        mode,
+                        window_size,
+                        overlap,
+                        sentences_per_chunk,
+                        paragraphs_per_page,
+                    )
+                })
+                .map_err($crate::engine::to_py_err)?;
             Ok((
                 $crate::engine::chunks_to_pylist(py, &chunks)?,
                 $crate::engine::images_to_py(py, images),
@@ -357,8 +379,9 @@ macro_rules! bind_images {
             py: Python<'_>,
             file_path: &str,
         ) -> PyResult<(String, Vec<(String, Py<pyo3::types::PyBytes>)>)> {
-            let (md, images) =
-                __engine::to_markdown_with_images(file_path).map_err($crate::engine::to_py_err)?;
+            let (md, images) = py
+                .allow_threads(|| __engine::to_markdown_with_images(file_path))
+                .map_err($crate::engine::to_py_err)?;
             Ok((md, $crate::engine::images_to_py(py, images)))
         }
 

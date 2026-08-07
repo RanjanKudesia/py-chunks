@@ -12,13 +12,18 @@ _ODF_MODES = {"default", "structural", "section", "semantic",
 _ODF_SUFFIXES = {".odt", ".odp"}
 
 
+def _validate_mode(mode: str) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _ODF_MODES:
+        raise ValueError(f"mode must be one of {sorted(_ODF_MODES)} for ODF, got: '{mode}'")
+
+
 def _validate(file_path: str, path: Path, mode: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"ODF file not found: {file_path}")
     if path.suffix.lower() not in _ODF_SUFFIXES:
         raise ValueError(f"Expected a .odt or .odp file, got: {file_path}")
-    if mode not in _ODF_MODES:
-        raise ValueError(f"mode must be one of {sorted(_ODF_MODES)} for ODF, got: '{mode}'")
+    _validate_mode(mode)
 
 
 def chunk_odf(

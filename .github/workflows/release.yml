@@ -6,6 +6,10 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Wheels are built with pyo3's `abi3-py39` feature (see Cargo.toml): each
+# platform gets ONE stable-ABI wheel (cp39-abi3) that covers CPython 3.9+.
+# The single `python-version: "3.13"` below is only the interpreter maturin
+# builds against — the produced wheel installs on 3.9 through 3.13+.
 jobs:
 
   # ── macOS ──────────────────────────────────────────────────────────────────
@@ -64,6 +68,70 @@ jobs:
           name: wheels-linux-x86_64
           path: target/wheels
 
+  # ── Linux aarch64 ──────────────────────────────────────────────────────────
+  build-linux-aarch64:
+    name: Linux aarch64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Build manylinux wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          target: aarch64-unknown-linux-gnu
+          manylinux: "2_28"
+          args: --release --out target/wheels
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64
+          path: target/wheels
+
+  # ── Test the built wheel ───────────────────────────────────────────────────
+  test-linux:
+    name: Test wheel (Linux x86_64, Python 3.11)
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately NOT 3.13: installing the cp39-abi3 wheel on 3.11 proves
+      # the stable-ABI wheel really spans Python versions.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: wheels
+
+      - name: Install wheel + pytest
+        run: |
+          pip install pytest
+          pip install wheels/*.whl
+
+      # HONEST COVERAGE NOTE: the shared fixture corpus (../test_files,
+      # ~280MB) lives outside this repo, and fixture-driven tests skip when
+      # it is absent. What runs here is the synthetic-fixture subset
+      # (~263 tests: JSON/JSONL/CSV/contract suites — verified locally:
+      # 263 passed, 501 skipped, 0 failed without the corpus). That covers
+      # import, dispatch, the bytes API and error contracts against the
+      # installed wheel; it is NOT the full ~4,900-test fixture suite.
+      # Tests are copied out of the repo so Python imports the installed
+      # wheel rather than the source tree (which has no compiled _rust).
+      - name: Run corpus-independent tests against the installed wheel
+        run: |
+          mkdir -p "$RUNNER_TEMP/wheeltest"
+          cp -r tests "$RUNNER_TEMP/wheeltest/tests"
+          cd "$RUNNER_TEMP/wheeltest"
+          python -m pytest tests -q
+
   # ── Windows x64 ────────────────────────────────────────────────────────────
   build-windows:
     name: Windows x64
@@ -105,7 +173,7 @@ jobs:
 
   # ── Publish ─────────────────────────────────────────────────────────────────
   publish:
-    needs: [build-macos, build-linux, build-windows, sdist]
+    needs: [build-macos, build-linux, build-linux-aarch64, build-windows, sdist, test-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

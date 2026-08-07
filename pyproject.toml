@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.6.0"
-description = "Rust-backed Python chunking library"
+version = "0.6.1"
+description = "Parse and chunk 36 document formats for RAG — one compiled Rust engine, zero Python dependencies"
 requires-python = ">=3.9"
 # No runtime dependencies. The Rust engine ships compiled inside the wheel and
 # vendors PDFium through the `liteparse` crate for scanned-page rasterisation,
@@ -16,10 +16,26 @@ license = { text = "MIT" }
 readme = "README.md"
 keywords = ["chunking", "document", "pdf", "docx", "docm", "dotx", "dotm", "doc", "pptx", "potx", "potm", "ppsx", "ppsm", "xlsx", "xls", "xlsm", "xlsb", "ods", "xltx", "xltm", "csv", "tsv", "msg", "outlook", "rtf", "epub", "ebook", "ipynb", "jupyter", "eml", "mbox", "email", "mime", "odt", "odp", "opendocument", "libreoffice", "json", "jsonl", "ndjson", "markdown", "rust"]
 classifiers = [
-    "Programming Language :: Python :: 3",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: General",
+    "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://www.chunkengine.dev"
+Documentation = "https://www.chunkengine.dev/docs"
+Repository = "https://github.com/RanjanKudesia/py-chunks"
 
 [project.optional-dependencies]
 dev = ["openpyxl>=3.1"]

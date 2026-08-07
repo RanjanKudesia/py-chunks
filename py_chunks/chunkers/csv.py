@@ -23,6 +23,29 @@ def _parse_delimiter(delimiter: str | None) -> int | None:
     raise ValueError("delimiter must be one of None, ',', '\\t', ';', or '|' for CSV")
 
 
+def _validate_csv_options(
+    mode: str,
+    rows_per_chunk: int,
+    window_size: int,
+    overlap: int,
+    encoding: str,
+) -> None:
+    """Path-independent half of the CSV validation — also used by the
+    source-agnostic bytes entry points, so the messages stay identical."""
+    if mode not in _CSV_MODES:
+        raise ValueError(f"mode must be one of {sorted(_CSV_MODES)} for CSV, got: '{mode}'")
+    if rows_per_chunk < 1:
+        raise ValueError("rows_per_chunk must be greater than 0")
+    if window_size < 1:
+        raise ValueError("window_size must be greater than 0")
+    if overlap >= window_size:
+        raise ValueError("overlap must be less than window_size")
+    if encoding.lower() not in {"utf-8", "utf-8-bom", "latin-1", "windows-1252"}:
+        raise ValueError(
+            "encoding must be one of 'utf-8', 'utf-8-bom', 'latin-1', or 'windows-1252'"
+        )
+
+
 def _validate_csv_args(
     file_path: str,
     path: Path,
@@ -37,18 +60,7 @@ def _validate_csv_args(
     if path.suffix.lower() not in _CSV_SUFFIXES:
         raise ValueError(
             f"Expected one of {', '.join(_CSV_SUFFIXES)}, got: {file_path}")
-    if mode not in _CSV_MODES:
-        raise ValueError(f"mode must be one of {sorted(_CSV_MODES)} for CSV, got: '{mode}'")
-    if rows_per_chunk < 1:
-        raise ValueError("rows_per_chunk must be greater than 0")
-    if window_size < 1:
-        raise ValueError("window_size must be greater than 0")
-    if overlap >= window_size:
-        raise ValueError("overlap must be less than window_size")
-    if encoding.lower() not in {"utf-8", "utf-8-bom", "latin-1", "windows-1252"}:
-        raise ValueError(
-            "encoding must be one of 'utf-8', 'utf-8-bom', 'latin-1', or 'windows-1252'"
-        )
+    _validate_csv_options(mode, rows_per_chunk, window_size, overlap, encoding)
 
 
 def chunk_csv(

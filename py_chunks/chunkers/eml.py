@@ -12,13 +12,18 @@ _EML_MODES = {"default", "structural", "section", "semantic",
 _EML_SUFFIXES = {".eml", ".mbox"}
 
 
+def _validate_mode(mode: str) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _EML_MODES:
+        raise ValueError(f"mode must be one of {sorted(_EML_MODES)} for email, got: '{mode}'")
+
+
 def _validate(file_path: str, path: Path, mode: str) -> None:
     if not path.is_file():
         raise FileNotFoundError(f"Email file not found: {file_path}")
     if path.suffix.lower() not in _EML_SUFFIXES:
         raise ValueError(f"Expected a .eml or .mbox file, got: {file_path}")
-    if mode not in _EML_MODES:
-        raise ValueError(f"mode must be one of {sorted(_EML_MODES)} for email, got: '{mode}'")
+    _validate_mode(mode)
 
 
 def chunk_eml(

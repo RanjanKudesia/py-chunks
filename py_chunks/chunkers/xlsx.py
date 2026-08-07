@@ -20,9 +20,7 @@ _XLSX_SUFFIXES = (".xlsx", ".xls", ".xlsm", ".xlsb", ".ods", ".xltx", ".xltm")
 _XLSX_IMAGE_SUFFIXES = (".xlsx", ".xlsm", ".xltx", ".xltm", ".xlsb", ".ods")
 
 
-def _validate_xlsx_args(
-    file_path: str,
-    path: Path,
+def _validate_xlsx_options(
     mode: str,
     rows_per_chunk: int,
     window_size: int,
@@ -30,11 +28,7 @@ def _validate_xlsx_args(
     serialize_as: str,
     max_chunk_chars: int,
 ) -> None:
-    if not path.is_file():
-        raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
-    if path.suffix.lower() not in _XLSX_SUFFIXES:
-        raise ValueError(
-            f"Expected one of {', '.join(_XLSX_SUFFIXES)}, got: {file_path}")
+    """Path-independent half of the validation — shared with the bytes route."""
     if mode not in _XLSX_MODES:
         raise ValueError(
             f"mode must be one of {sorted(_XLSX_MODES)} for XLSX, got: '{mode}'"
@@ -53,6 +47,26 @@ def _validate_xlsx_args(
             "serialize_as must be one of "
             f"{sorted(_XLSX_SERIALIZERS)} for XLSX, got: '{serialize_as}'"
         )
+
+
+def _validate_xlsx_args(
+    file_path: str,
+    path: Path,
+    mode: str,
+    rows_per_chunk: int,
+    window_size: int,
+    overlap: int,
+    serialize_as: str,
+    max_chunk_chars: int,
+) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"Spreadsheet file not found: {file_path}")
+    if path.suffix.lower() not in _XLSX_SUFFIXES:
+        raise ValueError(
+            f"Expected one of {', '.join(_XLSX_SUFFIXES)}, got: {file_path}")
+    _validate_xlsx_options(
+        mode, rows_per_chunk, window_size, overlap, serialize_as, max_chunk_chars
+    )
 
 
 def chunk_xlsx(

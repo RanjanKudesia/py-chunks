@@ -1,3 +1,4 @@
+mod dispatch_bytes;
 mod engine;
 mod engine_per_mode;
 mod engine_streams;
@@ -26,5 +27,7 @@ fn _rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     extensions::pptx::register(m)?;
     extensions::txt::register(m)?;
     extensions::xlsx::register(m)?;
+    // Source-agnostic bytes entry points (no temp files).
+    dispatch_bytes::register(m)?;
     Ok(())
 }

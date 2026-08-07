@@ -49,7 +49,7 @@ fn run_mode(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<PyObject> {
-    run(py, || {
+    run(py, move || {
         engine::chunk(
             file_path,
             mode,
@@ -162,7 +162,10 @@ impl XlsxStreamIterator {
     }
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        match self.stream.next() {
+        // The lazy backends parse on pull — release the GIL for the engine
+        // work, convert to a dict after reacquisition.
+        let stream = &mut self.stream;
+        match py.allow_threads(|| stream.next()) {
             None => Ok(None),
             Some(Ok(chunk)) => chunk_to_pydict(py, &chunk).map(Some),
             Some(Err(e)) => Err(to_py_err(e)),
@@ -174,6 +177,7 @@ impl XlsxStreamIterator {
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (file_path, mode, rows_per_chunk, window_size, overlap, include_headers, sheet_names, skip_empty_rows, max_chunk_chars))]
 fn stream_xlsx_chunks(
+    py: Python<'_>,
     file_path: &str,
     mode: &str,
     rows_per_chunk: usize,
@@ -184,18 +188,21 @@ fn stream_xlsx_chunks(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<XlsxStreamIterator> {
-    let stream = engine::stream(
-        file_path,
-        mode,
-        rows_per_chunk,
-        window_size,
-        overlap,
-        include_headers,
-        sheet_names,
-        skip_empty_rows,
-        max_chunk_chars,
-    )
-    .map_err(to_py_err)?;
+    let stream = py
+        .allow_threads(move || {
+            engine::stream(
+                file_path,
+                mode,
+                rows_per_chunk,
+                window_size,
+                overlap,
+                include_headers,
+                sheet_names,
+                skip_empty_rows,
+                max_chunk_chars,
+            )
+        })
+        .map_err(to_py_err)?;
     Ok(XlsxStreamIterator { stream })
 }
 
@@ -216,26 +223,29 @@ fn chunk_xlsx_with_images(
     skip_empty_rows: bool,
     max_chunk_chars: usize,
 ) -> PyResult<(Vec<PyObject>, Vec<(String, Py<PyBytes>)>)> {
-    let (chunks, images) = engine::chunk_with_images(
-        file_path,
-        mode,
-        rows_per_chunk,
-        window_size,
-        overlap,
-        include_headers,
-        sheet_names,
-        skip_empty_rows,
-        max_chunk_chars,
-    )
-    .map_err(to_py_err)?;
+    let (chunks, images) = py
+        .allow_threads(move || {
+            engine::chunk_with_images(
+                file_path,
+                mode,
+                rows_per_chunk,
+                window_size,
+                overlap,
+                include_headers,
+                sheet_names,
+                skip_empty_rows,
+                max_chunk_chars,
+            )
+        })
+        .map_err(to_py_err)?;
     Ok((chunks_to_pylist(py, &chunks)?, images_to_py(py, images)))
 }
 
-/// One of two markdown entry points in the library that take no `py` first
-/// parameter (`pptx_to_markdown` is the other). Part of the shipped signature.
+/// Kept `py`-less in the Python signature (pyo3 hides the `py` token); part of
+/// the shipped surface alongside `pptx_to_markdown`.
 #[pyfunction]
-fn xlsx_to_markdown(file_path: &str) -> PyResult<String> {
-    engine::to_markdown(file_path).map_err(to_py_err)
+fn xlsx_to_markdown(py: Python<'_>, file_path: &str) -> PyResult<String> {
+    py.allow_threads(|| engine::to_markdown(file_path)).map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -243,7 +253,9 @@ fn xlsx_to_markdown_with_images(
     py: Python<'_>,
     file_path: &str,
 ) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
-    let (md, images) = engine::to_markdown_with_images(file_path).map_err(to_py_err)?;
+    let (md, images) = py
+        .allow_threads(|| engine::to_markdown_with_images(file_path))
+        .map_err(to_py_err)?;
     Ok((md, images_to_py(py, images)))
 }
 

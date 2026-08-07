@@ -79,8 +79,14 @@ fn chunk_csv_sliding_window(
 
 #[pyfunction]
 #[pyo3(signature = (file_path, delimiter=None, encoding="utf-8"))]
-fn csv_to_markdown(file_path: &str, delimiter: Option<u8>, encoding: &str) -> PyResult<String> {
-    csv::csv_to_markdown(file_path, delimiter, encoding).map_err(to_py_err)
+fn csv_to_markdown(
+    py: Python<'_>,
+    file_path: &str,
+    delimiter: Option<u8>,
+    encoding: &str,
+) -> PyResult<String> {
+    py.allow_threads(|| csv::csv_to_markdown(file_path, delimiter, encoding))
+        .map_err(to_py_err)
 }
 
 #[pyfunction]
@@ -101,18 +107,21 @@ fn stream_csv_chunks(
     encoding: &str,
     skip_empty_rows: bool,
 ) -> PyResult<Py<ChunkStreamIterator>> {
-    let chunks = csv::chunk(
-        file_path,
-        mode,
-        rows_per_chunk,
-        window_size,
-        overlap,
-        include_headers,
-        delimiter,
-        encoding,
-        skip_empty_rows,
-    )
-    .map_err(to_py_err)?;
+    let chunks = py
+        .allow_threads(|| {
+            csv::chunk(
+                file_path,
+                mode,
+                rows_per_chunk,
+                window_size,
+                overlap,
+                include_headers,
+                delimiter,
+                encoding,
+                skip_empty_rows,
+            )
+        })
+        .map_err(to_py_err)?;
     ChunkStreamIterator::build(py, chunks)
 }
 

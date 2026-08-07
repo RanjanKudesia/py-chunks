@@ -48,6 +48,23 @@ def _validate_pptx_mode_args(
         raise ValueError(_E_SLIDES)
 
 
+def _validate_pptx_options(
+    mode: str,
+    window_size: int,
+    overlap: int,
+    sentences_per_chunk: int,
+    paragraphs_per_page: int,
+) -> None:
+    """Path-independent half of the validation — shared with the bytes route."""
+    if mode not in _PPTX_MODES:
+        raise ValueError(
+            f"mode must be one of {sorted(_PPTX_MODES)} for PPTX, got: '{mode}'"
+        )
+    _validate_pptx_mode_args(
+        mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
+    )
+
+
 def _validate_pptx_args(
     file_path: str,
     path: Path,
@@ -63,11 +80,7 @@ def _validate_pptx_args(
     if path.suffix.lower() not in _PPTX_SUFFIXES:
         raise ValueError(
             f"Expected one of {', '.join(_PPTX_SUFFIXES)}, got: {file_path}")
-    if mode not in _PPTX_MODES:
-        raise ValueError(
-            f"mode must be one of {sorted(_PPTX_MODES)} for PPTX, got: '{mode}'"
-        )
-    _validate_pptx_mode_args(
+    _validate_pptx_options(
         mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
     )
 

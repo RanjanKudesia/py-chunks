@@ -90,22 +90,27 @@ macro_rules! bind_per_mode_core {
             sentences_per_chunk: usize,
             paragraphs_per_page: usize,
         ) -> PyResult<__ImagePair> {
-            let (chunks, images) = __engine::chunk_with_images(
-                file_path,
-                mode,
-                window_size,
-                overlap,
-                sentences_per_chunk,
-                paragraphs_per_page,
-            )
-            .map_err(to_py_err)?;
+            // Engine work runs with the GIL released; Python conversion after.
+            let (chunks, images) = py
+                .allow_threads(|| {
+                    __engine::chunk_with_images(
+                        file_path,
+                        mode,
+                        window_size,
+                        overlap,
+                        sentences_per_chunk,
+                        paragraphs_per_page,
+                    )
+                })
+                .map_err(to_py_err)?;
             Ok((chunks_to_pylist(py, &chunks)?, images_to_py(py, images)))
         }
 
         /// Materialised chunks for a stream entry point — used by whichever
-        /// stream macro this format pairs with.
+        /// stream macro this format pairs with. Parses with the GIL released.
         #[allow(dead_code)]
         fn __chunks_for(
+            py: Python<'_>,
             file_path: &str,
             mode: &str,
             window_size: usize,
@@ -113,14 +118,16 @@ macro_rules! bind_per_mode_core {
             sentences_per_chunk: usize,
             paragraphs_per_page: usize,
         ) -> PyResult<Vec<chunks_rs::chunk::Chunk>> {
-            __engine::chunk(
-                file_path,
-                mode,
-                window_size,
-                overlap,
-                sentences_per_chunk,
-                paragraphs_per_page,
-            )
+            py.allow_threads(|| {
+                __engine::chunk(
+                    file_path,
+                    mode,
+                    window_size,
+                    overlap,
+                    sentences_per_chunk,
+                    paragraphs_per_page,
+                )
+            })
             .map_err(to_py_err)
         }
 
@@ -207,8 +214,8 @@ macro_rules! bind_per_mode_core {
         // ---- markdown -------------------------------------------------------
 
         #[pyfunction]
-        fn $f_md(file_path: &str) -> PyResult<String> {
-            __engine::to_markdown(file_path).map_err(to_py_err)
+        fn $f_md(py: Python<'_>, file_path: &str) -> PyResult<String> {
+            py.allow_threads(|| __engine::to_markdown(file_path)).map_err(to_py_err)
         }
 
         #[pyfunction]
@@ -216,7 +223,9 @@ macro_rules! bind_per_mode_core {
             py: Python<'_>,
             file_path: &str,
         ) -> PyResult<(String, Vec<(String, Py<PyBytes>)>)> {
-            let (md, images) = __engine::to_markdown_with_images(file_path).map_err(to_py_err)?;
+            let (md, images) = py
+                .allow_threads(|| __engine::to_markdown_with_images(file_path))
+                .map_err(to_py_err)?;
             Ok((md, images_to_py(py, images)))
         }
 
