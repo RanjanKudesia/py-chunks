@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+pytest.importorskip("xlwt")  # optional dev dep; absent in wheel-test CI
 import xlwt
 
 from py_chunks import get_chunks, get_chunks_from_bytes, stream_chunks

@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+pytest.importorskip("docx")  # optional dev dep; absent in wheel-test CI
 from docx import Document
 
 from py_chunks import get_markdown

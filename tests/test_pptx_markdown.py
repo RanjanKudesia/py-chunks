@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("pptx")  # optional dev dep; absent in wheel-test CI
 from pptx import Presentation
 from py_chunks import get_markdown
 from py_chunks.chunkers.pptx import pptx_to_markdown

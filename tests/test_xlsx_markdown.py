@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("openpyxl")  # optional dev dep; absent in wheel-test CI
 import openpyxl
 from py_chunks import get_markdown
 from py_chunks.chunkers.xlsx import xlsx_to_markdown

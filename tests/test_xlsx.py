@@ -4,6 +4,7 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
+pytest.importorskip("openpyxl")  # optional dev dep; absent in wheel-test CI
 from openpyxl import Workbook
 from openpyxl.worksheet.table import Table
 
