@@ -1,5 +1,7 @@
 """Markdown chunker wrapper over the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

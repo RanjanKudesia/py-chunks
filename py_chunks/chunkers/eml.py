@@ -2,6 +2,8 @@
 messages). Parsed via the Rust extension (mail-parser), assembled into markdown,
 and chunked through the Markdown pipeline. Mirrors the `.msg` chunker."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

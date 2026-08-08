@@ -2,6 +2,8 @@
 (line-delimited records). Records are rendered to markdown by the Rust extension
 and chunked through the Markdown pipeline. Mirrors the `.eml`/`.odf` chunkers."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

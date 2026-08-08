@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Seeded 2026-08 from the git history for 0.4.5 → 0.6.0; earlier releases are
 summarised only by their tags.
 
+## [0.6.2] - 2026-08-08
+
+### Fixed
+- **`stream_chunk_doc`, `stream_chunk_ppt` and `stream_chunk_docx` skipped
+  argument validation.** `stream_chunk_doc` and `stream_chunk_ppt` ran no
+  mode or numeric check at all, so a typo'd `mode` silently streamed
+  *default-mode* chunks instead of raising — the quietest possible failure.
+  `stream_chunk_docx` raised `NotImplementedError: Streaming for <mode> mode
+  coming soon` (every mode streams; nothing was unimplemented) and checked only
+  `window_size`. All three now run the same `_validate_*_options` their batch
+  and bytes routes run, so an invalid mode or argument is a `ValueError`
+  wherever you enter. **`stream_chunk_docx` no longer raises
+  `NotImplementedError`** — catch `ValueError`. The identical bug was fixed for
+  `stream_chunk_pptx` earlier and never propagated to its three siblings.
+- **EPUB accepted invalid mode arguments and returned no chunks.**
+  `get_chunks("book.epub", mode="sliding_window", window_size=100,
+  overlap=100)` returned **0 chunks** where a valid call returns 1,440. The
+  engine's EPUB facade never ran the shared argument check, and its per-chapter
+  builder failures are deliberately swallowed (an image-only cover page must not
+  abort a whole book), so a caller mistake became "this book is empty". Fixed in
+  the engine: `ValueError`, with the same message every other format raises.
+- **Spreadsheets silently accepted `paragraphs_per_page=0`.** The spreadsheet
+  family paginates by `rows_per_chunk`, so `paragraphs_per_page` was dropped at
+  the dispatch mapping site and never validated — while three docs pages promise
+  it is rejected. `get_chunks("book.xlsx", mode="page_aware",
+  paragraphs_per_page=0)` (and the bytes and streaming routes) now raise
+  `ValueError`.
+
+### Changed
+- **One wording per rejection.** `chunkers/doc.py`, `chunkers/ppt.py` and
+  `chunkers/docx.py` said `window_size must be > 0` (and doc/ppt also
+  `sentences_per_chunk must be > 0`, `paragraphs_per_page must be > 0`) where
+  the engine says `... must be greater than 0`; `chunkers/xlsx.py` said
+  `window_size must be >= 1`. All now use the engine's verbatim strings, held in
+  module-level constants shared by the batch, streaming and with-images entry
+  points (the pattern `chunkers/pptx.py` already used). The exception **type** is
+  unchanged (`ValueError`) — code matching on message *text* for these four
+  formats must update. Branch on the exception type, not the message.
+- **Python 3.9 compatibility (the declared floor was broken).** `import
+  py_chunks` raised `TypeError: unsupported operand type(s) for |: 'type' and
+  'NoneType'` on CPython 3.9 — 41 runtime-evaluated PEP 604 unions (`str |
+  None` and friends) in function signatures across `_sources.py`,
+  `chunkers/csv.py`, `chunkers/tsv.py`, `chunkers/pptx.py` and
+  `chunkers/xlsx.py`. `from __future__ import annotations` is now present in
+  all 22 package modules (and in the two test modules that had the same
+  problem), so annotations are never evaluated at definition time. Verified by
+  importing and running the cp39-abi3 wheel on CPython 3.9.6. `requires-python
+  = ">=3.9"` and the 3.9 classifier are now true statements.
+
+### Added
+- `py_chunks.__version__`, read from the installed distribution metadata via
+  `importlib.metadata`, so it cannot drift from what pip installed. Exported
+  through `__all__`.
+- A **Python 3.9 wheel-test job** in the release workflow (`test-linux-py39`),
+  gating `publish` alongside the existing 3.11 job. The 3.11 job proves the
+  stable ABI spans versions; the 3.9 job proves the Python sources contain no
+  post-3.9 syntax — a class of breakage no other job in the matrix could see.
+
 ## [0.6.1] - 2026-08-08
 
 ### Added
@@ -117,7 +175,9 @@ shared with `js-chunks` and the Rust crate.
 Baseline for this changelog. Earlier history (0.1.x–0.4.4) predates it; see
 git tags.
 
-[Unreleased]: https://github.com/RanjanKudesia/py-chunks/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/RanjanKudesia/py-chunks/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/RanjanKudesia/py-chunks/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/RanjanKudesia/py-chunks/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/RanjanKudesia/py-chunks/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/RanjanKudesia/py-chunks/compare/v0.4.7...v0.5.0
 [0.4.7]: https://github.com/RanjanKudesia/py-chunks/compare/v0.4.6...v0.4.7

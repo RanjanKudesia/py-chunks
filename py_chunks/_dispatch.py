@@ -6,6 +6,8 @@ validator. The entry points in ``_sources.py`` consume these tables;
 ``py_chunks/__init__.py`` re-exports the public names.
 """
 
+from __future__ import annotations
+
 import os
 
 from .chunkers.csv import (
@@ -267,6 +269,20 @@ def _xlsx_rows_per_chunk(sentences_per_chunk):
     return 1 if sentences_per_chunk == 3 else sentences_per_chunk
 
 
+def _validate_xlsx_page_arg(mode, paragraphs_per_page):
+    """Reject `paragraphs_per_page = 0` for the spreadsheet family.
+
+    Spreadsheets paginate by `rows_per_chunk`, so `paragraphs_per_page` is
+    dropped at this mapping site and never reaches the xlsx chunker — which
+    meant `page_aware` with `paragraphs_per_page=0` was silently accepted here
+    while every other format rejects it (and three docs pages promise it is
+    rejected). Mode-scoped exactly like the engine's `validate_mode_args`: the
+    value only has to be usable by the mode that reads it.
+    """
+    if mode == "page_aware" and paragraphs_per_page <= 0:
+        raise ValueError("paragraphs_per_page must be greater than 0")
+
+
 def _csv_rows_per_chunk(sentences_per_chunk):
     return max(1, sentences_per_chunk)
 
@@ -307,6 +323,7 @@ def _chunk_file(ext, file_path, *, mode, window_size, overlap,
                 sentences_per_chunk, paragraphs_per_page, delimiter, encoding):
     """Chunk one on-disk file, applying the family-specific parameter mapping."""
     if ext in _SPREADSHEET_EXTS:
+        _validate_xlsx_page_arg(mode, paragraphs_per_page)
         chunks, _ = chunk_xlsx(
             file_path,
             mode="row" if mode == "default" else mode,
@@ -344,6 +361,7 @@ def _open_stream(ext, file_path, *, mode, window_size, overlap,
                  sentences_per_chunk, paragraphs_per_page, delimiter, encoding):
     """Open a streaming iterator over one on-disk file (table-driven)."""
     if ext in _SPREADSHEET_EXTS:
+        _validate_xlsx_page_arg(mode, paragraphs_per_page)
         return stream_chunk_xlsx(
             file_path,
             mode="row" if mode == "default" else mode,
@@ -431,6 +449,7 @@ def _validate_bytes_options(ext, mode, window_size, overlap,
     the same parameter mapping the batch route applies.
     """
     if ext in _SPREADSHEET_EXTS:
+        _validate_xlsx_page_arg(mode, paragraphs_per_page)
         _validate_xlsx_options(
             "row" if mode == "default" else mode,
             _xlsx_rows_per_chunk(sentences_per_chunk),

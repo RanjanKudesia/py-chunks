@@ -14,8 +14,10 @@ File inventory (test_files/docx/):
   tables.docx           — table-heavy document
   tracked_changes.docx  — document with tracked revisions
 
-Streaming note: DOCX only supports streaming for default/structural.
-All other modes raise NotImplementedError on stream.
+Streaming note: every mode streams. `stream_chunk_docx` used to raise
+NotImplementedError ("Streaming for <mode> mode coming soon") for an unknown
+mode — it now raises ValueError, like every other entry point, because an
+unknown mode is a caller mistake and not an unimplemented feature.
 """
 
 from io import BytesIO
@@ -692,6 +694,54 @@ class TestDocxStreamingValidation:
     def test_invalid_mode_raises(self, docx_file):
         with pytest.raises((ValueError, NotImplementedError)):
             stream_chunk_docx(str(docx_file), mode="not_a_real_mode")
+
+    # Regression: an unknown mode raised `NotImplementedError: Streaming for
+    # <mode> mode coming soon`, which claimed the feature was missing. Every
+    # mode streams — it is a caller mistake, so it is a ValueError, and the
+    # message is the one the batch route already used.
+    def test_invalid_mode_is_a_value_error_not_not_implemented(self, docx_file):
+        with pytest.raises(ValueError, match="^mode must be 'default', "):
+            stream_chunk_docx(str(docx_file), mode="not_a_real_mode")
+
+    # Regression: streaming checked only `window_size`, so overlap /
+    # sentences_per_chunk / paragraphs_per_page reached the engine unvalidated
+    # (or, for paragraphs_per_page, were never checked at all).
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            (
+                {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+                "^window_size must be greater than 0$",
+            ),
+            (
+                {"mode": "sliding_window", "window_size": 3, "overlap": 3},
+                "^overlap must be less than window_size$",
+            ),
+            (
+                {"mode": "sentence", "sentences_per_chunk": 0},
+                "^sentences_per_chunk must be greater than 0$",
+            ),
+            (
+                {"mode": "page_aware", "paragraphs_per_page": 0},
+                "^paragraphs_per_page must be greater than 0$",
+            ),
+        ],
+    )
+    def test_numeric_validation_uses_the_engine_wording(self, docx_file, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            stream_chunk_docx(str(docx_file), **kwargs)
+
+    # Every mode really does stream — proof that dropping the
+    # NotImplementedError guard did not paper over a missing implementation.
+    @pytest.mark.parametrize(
+        "mode",
+        ["default", "structural", "semantic", "section",
+         "sliding_window", "sentence", "page_aware"],
+    )
+    def test_every_mode_streams(self, docx_file, mode):
+        chunks = list(stream_chunk_docx(str(docx_file), mode=mode))
+        assert chunks, f"{docx_file.name}: {mode} streamed nothing"
+        assert all(STANDARD_KEYS.issubset(c.keys()) for c in chunks)
 
 
 @pytest.mark.parametrize("docx_file", ALL_DOCX_FILES, ids=DOCX_IDS)

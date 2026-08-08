@@ -6,7 +6,10 @@ URLs. Format routing lives in ``_dispatch``; the source-agnostic entry points
 live in ``_sources``.
 """
 
+from __future__ import annotations
+
 import os
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
 from pathlib import Path
 
 from .chunkers.csv import chunk_csv, stream_chunk_csv
@@ -48,6 +51,15 @@ from ._sources import (
     stream_chunks_from_upload,
 )
 
+#: Installed distribution version of PyPI ``py-chunks``. Read from the
+#: distribution metadata rather than hard-coded, so it can never drift from
+#: what pip actually installed. Falls back when the package is imported from a
+#: source tree that was never installed (no ``.dist-info`` to read).
+try:
+    __version__ = _distribution_version("py-chunks")
+except PackageNotFoundError:  # pragma: no cover - source tree without install
+    __version__ = "0.0.0+unknown"
+
 _pkg_dir = Path(__file__).parent
 
 os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(_pkg_dir))
@@ -56,6 +68,8 @@ os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(_pkg_dir))
 # binding — no external PDFium binary resolution is required here anymore.
 
 __all__ = [
+    # Package metadata
+    "__version__",
     # Result types
     "ChunksResult",
     "MarkdownResult",

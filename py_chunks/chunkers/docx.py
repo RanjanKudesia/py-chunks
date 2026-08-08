@@ -1,5 +1,7 @@
 """DOCX chunker wrapper over the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
@@ -16,6 +18,15 @@ _DOCX_MODES = {
     "sentence",
     "page_aware",
 }
+
+# One wording per rejection, shared by every entry point — the same pattern
+# `chunkers/pptx.py` uses. The strings are the *engine's* own; `window_size` was
+# the one that diverged here ("must be > 0"), so all three entry points said
+# something the engine never says.
+_E_WINDOW = "window_size must be greater than 0"
+_E_OVERLAP = "overlap must be less than window_size"
+_E_SENTENCES = "sentences_per_chunk must be greater than 0"
+_E_PARAGRAPHS = "paragraphs_per_page must be greater than 0"
 
 
 def _validate_docx_options(
@@ -35,13 +46,13 @@ def _validate_docx_options(
     normalized_mode = "structural" if mode == "default" else mode
 
     if normalized_mode == "sliding_window" and window_size <= 0:
-        raise ValueError("window_size must be > 0")
+        raise ValueError(_E_WINDOW)
     if normalized_mode == "sliding_window" and overlap >= window_size:
-        raise ValueError("overlap must be less than window_size")
+        raise ValueError(_E_OVERLAP)
     if normalized_mode == "sentence" and sentences_per_chunk <= 0:
-        raise ValueError("sentences_per_chunk must be greater than 0")
+        raise ValueError(_E_SENTENCES)
     if normalized_mode == "page_aware" and paragraphs_per_page <= 0:
-        raise ValueError("paragraphs_per_page must be greater than 0")
+        raise ValueError(_E_PARAGRAPHS)
 
     return normalized_mode
 
@@ -166,8 +177,8 @@ def stream_chunk_docx(
 
     Raises:
         FileNotFoundError: If the file does not exist.
-        ValueError: If the file extension is not .docx.
-        NotImplementedError: If mode is not supported.
+        ValueError: If the file extension is not one of the DOCX suffixes, or
+            the mode/argument combination is invalid.
     """
     path = Path(file_path)
     if not path.is_file():
@@ -176,27 +187,27 @@ def stream_chunk_docx(
         raise ValueError(
             f"Expected one of {', '.join(_DOCX_SUFFIXES)}, got: {file_path}")
 
-    if mode not in {
-        "default", "structural", "semantic", "section",
-        "sliding_window", "sentence", "page_aware",
-    }:
-        raise NotImplementedError(f"Streaming for {mode} mode coming soon")
+    # Every mode streams, so an unknown one is a caller mistake (ValueError),
+    # not an unimplemented feature. This used to raise `NotImplementedError:
+    # Streaming for <mode> mode coming soon` and check only `window_size`,
+    # leaving overlap/sentences_per_chunk/paragraphs_per_page unvalidated.
+    normalized_mode = _validate_docx_options(
+        mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page
+    )
 
-    if mode == "semantic":
+    if normalized_mode == "semantic":
         return _rust.chunk_docx_semantic_stream(str(path))
 
-    if mode == "section":
+    if normalized_mode == "section":
         return _rust.chunk_docx_section_stream(str(path))
 
-    if mode == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be > 0")
+    if normalized_mode == "sliding_window":
         return _rust.chunk_docx_sliding_window_stream(str(path), window_size, overlap)
 
-    if mode == "sentence":
+    if normalized_mode == "sentence":
         return _rust.chunk_docx_sentence_stream(str(path), sentences_per_chunk)
 
-    if mode == "page_aware":
+    if normalized_mode == "page_aware":
         return _rust.chunk_docx_page_aware_stream(str(path), paragraphs_per_page)
 
     return _rust.chunk_docx_structural_stream(str(path))
@@ -256,21 +267,21 @@ def chunk_docx_with_images(
         chunk_list, image_list = _rust.chunk_docx_semantic_with_images(path_str)
     elif normalized_mode == "sliding_window":
         if window_size <= 0:
-            raise ValueError("window_size must be > 0")
+            raise ValueError(_E_WINDOW)
         if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
+            raise ValueError(_E_OVERLAP)
         chunk_list, image_list = _rust.chunk_docx_sliding_window_with_images(
             path_str, window_size, overlap
         )
     elif normalized_mode == "sentence":
         if sentences_per_chunk <= 0:
-            raise ValueError("sentences_per_chunk must be greater than 0")
+            raise ValueError(_E_SENTENCES)
         chunk_list, image_list = _rust.chunk_docx_sentence_with_images(
             path_str, sentences_per_chunk
         )
     elif normalized_mode == "page_aware":
         if paragraphs_per_page <= 0:
-            raise ValueError("paragraphs_per_page must be greater than 0")
+            raise ValueError(_E_PARAGRAPHS)
         chunk_list, image_list = _rust.chunk_docx_page_aware_with_images(
             path_str, paragraphs_per_page
         )

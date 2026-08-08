@@ -6,6 +6,8 @@ support is purely a matter of defaulting the delimiter to ``"\\t"`` and acceptin
 the ``.tsv`` suffix. Passing ``delimiter=None`` explicitly re-enables auto-detect.
 """
 
+from __future__ import annotations
+
 from .csv import chunk_csv, stream_chunk_csv, csv_to_markdown
 
 _TAB = "\t"

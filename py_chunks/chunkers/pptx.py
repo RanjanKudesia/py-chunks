@@ -1,5 +1,7 @@
 """PPTX chunker wrapper over the Rust extension."""
 
+from __future__ import annotations
+
 # pylint: disable=c-extension-no-member,too-many-arguments,too-many-positional-arguments
 import time
 import warnings

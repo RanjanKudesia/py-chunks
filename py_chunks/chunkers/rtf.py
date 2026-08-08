@@ -1,6 +1,8 @@
 """RTF chunker — spec-correct hand-rolled text extraction via the Rust
 extension, chunked through the Markdown pipeline."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

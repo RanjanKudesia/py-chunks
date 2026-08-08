@@ -128,3 +128,87 @@ def test_zip_without_container_raises(tmp_path):
     fake.write_bytes(buf.getvalue())
     with pytest.raises(Exception):  # noqa: B017
         get_chunks(str(fake))
+
+
+# ── Argument validation (regression: the EPUB facade validated nowhere) ───────
+#
+# The engine's EPUB facade never ran the shared argument check, and
+# `extract.rs::chunk_package` deliberately swallows per-chapter builder
+# failures, so an invalid argument produced ZERO CHUNKS instead of an error —
+# and py-chunks had no numeric check of its own to catch it either (only a
+# mode-set check). A silent empty result is worse than an exception.
+
+
+def _book():
+    return str(_pick("gutenberg_moby_dick.epub"))
+
+
+def test_bad_args_raise_instead_of_returning_no_chunks():
+    # The contrast is the whole point: with a usable overlap the same call
+    # returns a real book, so the old `[]` was indistinguishable from "this book
+    # has no content" rather than from an error.
+    assert len(get_chunks(_book())) > 1000, "sanity: default mode must chunk the book"
+    valid = get_chunks(_book(), mode="sliding_window", window_size=100, overlap=20)
+    assert len(valid) > 10, f"sanity: a valid call must chunk, got {len(valid)}"
+    with pytest.raises(ValueError, match="^overlap must be less than window_size$"):
+        get_chunks(_book(), mode="sliding_window", window_size=100, overlap=100)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+            "^window_size must be greater than 0$",
+        ),
+        (
+            {"mode": "sliding_window", "window_size": 100, "overlap": 100},
+            "^overlap must be less than window_size$",
+        ),
+        (
+            {"mode": "sentence", "sentences_per_chunk": 0},
+            "^sentences_per_chunk must be greater than 0$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_every_bad_arg_raises_with_the_engine_wording(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        get_chunks(_book(), **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 100, "overlap": 100},
+            "^overlap must be less than window_size$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_bytes_route_validates_before_parsing(kwargs, message):
+    # Validation runs before any parsing, so unparseable bytes still reject on
+    # the argument — the check is not hiding behind a successful parse.
+    with pytest.raises(ValueError, match=message):
+        get_chunks_from_bytes(b"not an epub at all", filename="x.epub", **kwargs)
+
+
+def test_streaming_route_validates_too():
+    with pytest.raises(ValueError, match="^overlap must be less than window_size$"):
+        list(stream_chunks(_book(), mode="sliding_window", window_size=100, overlap=100))
+
+
+def test_with_images_route_validates_too():
+    from py_chunks.chunkers.epub import chunk_epub_with_images
+
+    with pytest.raises(ValueError, match="^overlap must be less than window_size$"):
+        chunk_epub_with_images(
+            _book(), mode="sliding_window", window_size=100, overlap=100
+        )

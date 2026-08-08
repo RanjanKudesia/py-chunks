@@ -160,3 +160,72 @@ def test_invalid_params_raise(fp):
         chunk_ppt(str(fp), mode="bogus")
     with pytest.raises(ValueError):
         chunk_ppt(str(fp), mode="sliding_window", window_size=2, overlap=2)
+
+
+# ── Streaming argument validation (regression) ────────────────────────────────
+#
+# `stream_chunk_ppt` ran NO validation: a typo'd mode silently streamed
+# default-mode chunks (100 of them) instead of raising, and every numeric
+# argument was unchecked. The batch route always validated, so the two entry
+# points disagreed about what a valid call even is.
+
+
+def test_stream_rejects_an_invalid_mode_instead_of_defaulting():
+    fp = PPT_FILES[0]
+    default_count = len(list(stream_chunk_ppt(str(fp))))
+    assert default_count > 0, "sanity: the default mode must stream something"
+    with pytest.raises(ValueError, match="^mode must be one of "):
+        stream_chunk_ppt(str(fp), mode="not_a_real_mode")
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+            "^window_size must be greater than 0$",
+        ),
+        (
+            {"mode": "sliding_window", "window_size": 2, "overlap": 2},
+            "^overlap must be less than window_size$",
+        ),
+        (
+            {"mode": "sentence", "sentences_per_chunk": 0},
+            "^sentences_per_chunk must be greater than 0$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_stream_numeric_validation_uses_the_engine_wording(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        stream_chunk_ppt(str(PPT_FILES[0]), **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+            "^window_size must be greater than 0$",
+        ),
+        (
+            {"mode": "sentence", "sentences_per_chunk": 0},
+            "^sentences_per_chunk must be greater than 0$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_batch_and_with_images_share_the_same_wording(kwargs, message):
+    from py_chunks.chunkers.ppt import chunk_ppt_with_images
+
+    fp = str(PPT_FILES[0])
+    with pytest.raises(ValueError, match=message):
+        chunk_ppt(fp, **kwargs)
+    with pytest.raises(ValueError, match=message):
+        chunk_ppt_with_images(fp, **kwargs)

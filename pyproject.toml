@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "py-chunks"
-version = "0.6.1"
+version = "0.6.2"
 description = "Parse and chunk 36 document formats for RAG — one compiled Rust engine, zero Python dependencies"
 requires-python = ">=3.9"
 # No runtime dependencies. The Rust engine ships compiled inside the wheel and

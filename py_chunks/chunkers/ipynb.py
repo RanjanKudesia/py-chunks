@@ -1,6 +1,8 @@
 """Jupyter notebook (.ipynb) chunker — JSON cell assembly + Markdown chunking,
 via the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

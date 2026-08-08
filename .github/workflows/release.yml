@@ -132,6 +132,50 @@ jobs:
           cd "$RUNNER_TEMP/wheeltest"
           python -m pytest tests -q
 
+  # ── Test the built wheel on the OLDEST supported interpreter ───────────────
+  # 3.9 is the floor declared by `requires-python` and by pyo3's abi3-py39
+  # feature. It is tested separately from the 3.11 job above because the
+  # failure modes differ: 3.11 proves the stable ABI spans versions, 3.9
+  # proves the *Python* sources contain no post-3.9 syntax. Runtime-evaluated
+  # PEP 604 unions (`str | None` in a signature, 3.10+) raise TypeError at
+  # import on 3.9 and are invisible to every other job here.
+  test-linux-py39:
+    name: Test wheel (Linux x86_64, Python 3.9 — floor)
+    needs: build-linux
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux-x86_64
+          path: wheels
+
+      - name: Install wheel + pytest
+        run: |
+          pip install pytest
+          pip install wheels/*.whl
+
+      # Import from a directory that is NOT the repo root, so the installed
+      # wheel is what gets imported (the source tree has no compiled _rust).
+      - name: Import on 3.9
+        run: |
+          cd "$RUNNER_TEMP"
+          python -c "import sys, py_chunks; print(sys.version); print(py_chunks.__version__); print(len(py_chunks.__all__), 'exported names')"
+
+      # Same corpus-free subset as the 3.11 job — see the honest coverage note
+      # there. The fixture-driven tests skip without ../test_files.
+      - name: Run corpus-independent tests against the installed wheel
+        run: |
+          mkdir -p "$RUNNER_TEMP/wheeltest39"
+          cp -r tests "$RUNNER_TEMP/wheeltest39/tests"
+          cd "$RUNNER_TEMP/wheeltest39"
+          python -m pytest tests -q
+
   # ── Windows x64 ────────────────────────────────────────────────────────────
   build-windows:
     name: Windows x64
@@ -173,7 +217,7 @@ jobs:
 
   # ── Publish ─────────────────────────────────────────────────────────────────
   publish:
-    needs: [build-macos, build-linux, build-linux-aarch64, build-windows, sdist, test-linux]
+    needs: [build-macos, build-linux, build-linux-aarch64, build-windows, sdist, test-linux, test-linux-py39]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:

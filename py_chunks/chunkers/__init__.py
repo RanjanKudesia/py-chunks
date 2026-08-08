@@ -1,5 +1,7 @@
 """Format-specific Python chunker wrappers."""
 
+from __future__ import annotations
+
 from .doc import chunk_doc, stream_chunk_doc, doc_to_markdown
 from .docx import chunk_docx, stream_chunk_docx
 from .csv import chunk_csv, stream_chunk_csv

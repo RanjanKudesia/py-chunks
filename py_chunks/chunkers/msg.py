@@ -1,6 +1,8 @@
 """Outlook .msg chunker — MAPI extraction (envelope + body + attachments) via
 the Rust extension, chunked through the Markdown pipeline."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

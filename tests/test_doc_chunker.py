@@ -165,3 +165,74 @@ def test_no_oversized_chunks_and_no_nul(doc_path):
             f"{doc_path.name}: oversized chunk of {len(c['content'])} chars"
         )
         assert "\x00" not in c["content"], f"{doc_path.name}: NUL leaked into text"
+
+
+# ── Streaming argument validation (regression) ────────────────────────────────
+#
+# `stream_chunk_doc` ran NO validation: a typo'd mode silently streamed
+# default-mode chunks (137 of them) instead of raising, and every numeric
+# argument was unchecked. The batch route always validated, so the two entry
+# points disagreed about what a valid call even is.
+
+
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
+def test_stream_rejects_an_invalid_mode_instead_of_defaulting():
+    fp = str(doc_files()[0])
+    assert len(list(stream_chunk_doc(fp))) > 0, "sanity: default mode must stream"
+    with pytest.raises(ValueError, match="^mode must be one of "):
+        stream_chunk_doc(fp, mode="not_a_real_mode")
+
+
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+            "^window_size must be greater than 0$",
+        ),
+        (
+            {"mode": "sliding_window", "window_size": 2, "overlap": 2},
+            "^overlap must be less than window_size$",
+        ),
+        (
+            {"mode": "sentence", "sentences_per_chunk": 0},
+            "^sentences_per_chunk must be greater than 0$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_stream_numeric_validation_uses_the_engine_wording(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        stream_chunk_doc(str(doc_files()[0]), **kwargs)
+
+
+@pytest.mark.skipif(not has_fixtures, reason="No .doc fixtures in ../test_files/doc/")
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        (
+            {"mode": "sliding_window", "window_size": 0, "overlap": 0},
+            "^window_size must be greater than 0$",
+        ),
+        (
+            {"mode": "sentence", "sentences_per_chunk": 0},
+            "^sentences_per_chunk must be greater than 0$",
+        ),
+        (
+            {"mode": "page_aware", "paragraphs_per_page": 0},
+            "^paragraphs_per_page must be greater than 0$",
+        ),
+    ],
+)
+def test_batch_and_with_images_share_the_same_wording(kwargs, message):
+    from py_chunks.chunkers.doc import chunk_doc_with_images
+
+    fp = str(doc_files()[0])
+    with pytest.raises(ValueError, match=message):
+        chunk_doc(fp, **kwargs)
+    with pytest.raises(ValueError, match=message):
+        chunk_doc_with_images(fp, **kwargs)

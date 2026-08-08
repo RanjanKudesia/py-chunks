@@ -2,6 +2,8 @@
 Rust extension (zip + content.xml walker), assembled into markdown, and chunked
 through the Markdown pipeline. Mirrors the `.eml`/`.msg` chunkers."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 

@@ -1,5 +1,7 @@
 """XLSX chunker wrapper over the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
@@ -37,7 +39,10 @@ def _validate_xlsx_options(
         raise ValueError("rows_per_chunk must be greater than 0")
     if mode == "sliding_window":
         if window_size < 1:
-            raise ValueError("window_size must be >= 1")
+            # Canonical wording: the spreadsheet family said "must be >= 1" for
+            # this one parameter while every other format (and every other
+            # parameter here) says "must be greater than 0".
+            raise ValueError("window_size must be greater than 0")
         if overlap >= window_size:
             raise ValueError("overlap must be less than window_size")
     if max_chunk_chars < 1:
@@ -220,8 +225,14 @@ def chunk_xlsx_with_images(
 
     if sentences_per_chunk is not None and rows_per_chunk == 1:
         rows_per_chunk = 1 if sentences_per_chunk == 3 else sentences_per_chunk
-    # For API compatibility with get_chunks(..., mode="page_aware").
-    _ = paragraphs_per_page
+    # Accepted for API compatibility with get_chunks(..., mode="page_aware")
+    # and otherwise ignored — spreadsheets paginate by sheet region, not by a
+    # unit count. Ignored is not the same as unvalidated, though: 0 is a caller
+    # mistake and used to be swallowed here, uniquely among the formats. Scoped
+    # to page_aware, the only mode that would read it.
+    if normalized_mode == "page_aware" and paragraphs_per_page is not None \
+            and paragraphs_per_page <= 0:
+        raise ValueError("paragraphs_per_page must be greater than 0")
 
     _validate_xlsx_args(
         file_path,

@@ -732,6 +732,75 @@ def test_sliding_window_errors(tmp_path: Path):
         )
 
 
+# Regression: the spreadsheet family was the last place that said
+# "window_size must be >= 1" while every other format — and every other
+# parameter here — said "must be greater than 0".
+def test_window_size_message_matches_every_other_format(tmp_path: Path):
+    path = _write_sliding_window_xlsx(tmp_path)
+    with pytest.raises(ValueError, match="^window_size must be greater than 0$"):
+        chunk_xlsx(str(path), mode="sliding_window", window_size=0, overlap=0)
+
+
+def test_window_size_message_matches_on_the_streaming_route(tmp_path: Path):
+    path = _write_sliding_window_xlsx(tmp_path)
+    with pytest.raises(ValueError, match="^window_size must be greater than 0$"):
+        stream_chunk_xlsx(str(path), mode="sliding_window", window_size=0, overlap=0)
+
+
+# Regression: `paragraphs_per_page` is dropped at the spreadsheet mapping site
+# (spreadsheets paginate by rows_per_chunk), so `page_aware` with 0 was silently
+# ACCEPTED for this family while every other format rejects it — and three docs
+# pages promise it is rejected.
+@pytest.mark.parametrize(
+    "route", ["path", "bytes", "fileobj", "stream", "images", "bytes_images"]
+)
+def test_page_aware_rejects_paragraphs_per_page_zero(tmp_path: Path, route: str):
+    path = _write_sliding_window_xlsx(tmp_path)
+    data = Path(path).read_bytes()
+    message = "^paragraphs_per_page must be greater than 0$"
+    with pytest.raises(ValueError, match=message):
+        if route == "path":
+            get_chunks(str(path), mode="page_aware", paragraphs_per_page=0)
+        elif route == "bytes":
+            get_chunks_from_bytes(data, filename="x.xlsx", mode="page_aware",
+                                  paragraphs_per_page=0)
+        elif route == "fileobj":
+            get_chunks_from_fileobj(BytesIO(data), filename="x.xlsx",
+                                    mode="page_aware", paragraphs_per_page=0)
+        elif route == "images":
+            # `list_images=True` bypasses `_chunk_file` entirely and calls
+            # chunk_xlsx_with_images, which is where the parameter was dropped.
+            get_chunks(str(path), mode="page_aware", paragraphs_per_page=0,
+                       list_images=True)
+        elif route == "bytes_images":
+            get_chunks_from_bytes(data, filename="x.xlsx", mode="page_aware",
+                                  paragraphs_per_page=0, list_images=True)
+        else:
+            list(stream_chunks(str(path), mode="page_aware", paragraphs_per_page=0))
+
+
+def test_a_usable_paragraphs_per_page_is_still_ignored_not_rejected(tmp_path: Path):
+    """The parameter is meaningless for spreadsheets — only 0 is an error.
+
+    Rejecting 0 must not turn `paragraphs_per_page` into a parameter the
+    spreadsheet family honours; page_aware here still paginates by sheet region.
+    """
+    path = _write_sliding_window_xlsx(tmp_path)
+    a = get_chunks(str(path), mode="page_aware", paragraphs_per_page=1)
+    b = get_chunks(str(path), mode="page_aware", paragraphs_per_page=99)
+    assert a and [c["content"] for c in a] == [c["content"] for c in b]
+
+
+def test_non_page_aware_modes_still_accept_paragraphs_per_page_zero(tmp_path: Path):
+    """Mode-scoped exactly like the engine's own check.
+
+    `paragraphs_per_page` is only read by `page_aware`, so 0 in any other mode
+    is not a mistake — and no other format rejects it there either.
+    """
+    path = _write_sliding_window_xlsx(tmp_path)
+    assert get_chunks(str(path), mode="row", paragraphs_per_page=0)
+
+
 PAGE_AWARE_METADATA_KEYS = {
     "sheet_name",
     "sheet_index",

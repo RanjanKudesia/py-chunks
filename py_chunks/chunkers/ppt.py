@@ -1,5 +1,7 @@
 """PPT (PowerPoint 97-2003) chunker wrapper over the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
@@ -15,6 +17,15 @@ _PPT_MODES = {
     "page_aware",
 }
 
+# One wording per rejection, shared by every entry point — the same pattern
+# `chunkers/pptx.py` uses. The strings are the *engine's* own, so a caller sees
+# one sentence per mistake no matter which layer rejected it (this file used to
+# say "must be > 0" where the engine says "must be greater than 0").
+_E_WINDOW = "window_size must be greater than 0"
+_E_OVERLAP = "overlap must be less than window_size"
+_E_SENTENCES = "sentences_per_chunk must be greater than 0"
+_E_PARAGRAPHS = "paragraphs_per_page must be greater than 0"
+
 
 def _validate_ppt_options(
     mode: str,
@@ -23,19 +34,24 @@ def _validate_ppt_options(
     sentences_per_chunk: int,
     paragraphs_per_page: int,
 ) -> None:
-    """Path-independent half of the validation — shared with the bytes route."""
+    """Raise for argument values the requested mode cannot use.
+
+    Path-independent, so the bytes route shares it — and so do the batch,
+    streaming and with-images entry points, which all reject the same argument
+    with the same wording.
+    """
     if mode not in _PPT_MODES:
         raise ValueError(f"mode must be one of {sorted(_PPT_MODES)}")
     normalized = "structural" if mode == "default" else mode
     if normalized == "sliding_window":
         if window_size <= 0:
-            raise ValueError("window_size must be > 0")
+            raise ValueError(_E_WINDOW)
         if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
+            raise ValueError(_E_OVERLAP)
     if normalized == "sentence" and sentences_per_chunk <= 0:
-        raise ValueError("sentences_per_chunk must be > 0")
+        raise ValueError(_E_SENTENCES)
     if normalized == "page_aware" and paragraphs_per_page <= 0:
-        raise ValueError("paragraphs_per_page must be > 0")
+        raise ValueError(_E_PARAGRAPHS)
 
 
 def chunk_ppt(
@@ -84,12 +100,21 @@ def stream_chunk_ppt(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
 ):
-    """Stream chunks from a .ppt file as an iterator."""
+    """Stream chunks from a .ppt file as an iterator.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        ValueError: If the extension is not .ppt, or the mode/arguments are
+            invalid.
+    """
     path = Path(file_path)
     if not path.is_file():
         raise FileNotFoundError(f"PPT file not found: {file_path}")
     if path.suffix.lower() != ".ppt":
         raise ValueError(f"Expected a .ppt file, got: {file_path}")
+    # Streaming skipped this entirely, so a typo'd mode silently streamed
+    # *default-mode* chunks instead of raising.
+    _validate_ppt_options(mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page)
 
     normalized = "structural" if mode == "default" else mode
 
@@ -145,8 +170,7 @@ def chunk_ppt_with_images(
         raise FileNotFoundError(f"PPT file not found: {file_path}")
     if path.suffix.lower() != ".ppt":
         raise ValueError(f"Expected a .ppt file, got: {file_path}")
-    if mode not in _PPT_MODES:
-        raise ValueError(f"mode must be one of {sorted(_PPT_MODES)}")
+    _validate_ppt_options(mode, window_size, overlap, sentences_per_chunk, paragraphs_per_page)
 
     normalized = "structural" if mode == "default" else mode
     path_str = str(path)
@@ -158,22 +182,14 @@ def chunk_ppt_with_images(
     elif normalized == "semantic":
         chunk_list, image_list = _rust.chunk_ppt_semantic_with_images(path_str)
     elif normalized == "sliding_window":
-        if window_size <= 0:
-            raise ValueError("window_size must be > 0")
-        if overlap >= window_size:
-            raise ValueError("overlap must be less than window_size")
         chunk_list, image_list = _rust.chunk_ppt_sliding_window_with_images(
             path_str, window_size, overlap
         )
     elif normalized == "sentence":
-        if sentences_per_chunk <= 0:
-            raise ValueError("sentences_per_chunk must be > 0")
         chunk_list, image_list = _rust.chunk_ppt_sentence_with_images(
             path_str, sentences_per_chunk
         )
     elif normalized == "page_aware":
-        if paragraphs_per_page <= 0:
-            raise ValueError("paragraphs_per_page must be > 0")
         chunk_list, image_list = _rust.chunk_ppt_page_aware_with_images(
             path_str, paragraphs_per_page
         )

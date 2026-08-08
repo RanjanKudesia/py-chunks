@@ -8,6 +8,8 @@ bytes path still materialises a temp file, because the engine's streaming
 surface is path-based.
 """
 
+from __future__ import annotations
+
 import os
 import tempfile
 from dataclasses import dataclass, field

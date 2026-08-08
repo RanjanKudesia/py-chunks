@@ -1,6 +1,8 @@
 """EPUB chunker — OCF/OPF navigation + HTML chunking in spine (reading) order,
 via the Rust extension."""
 
+from __future__ import annotations
+
 import time
 from pathlib import Path
 
