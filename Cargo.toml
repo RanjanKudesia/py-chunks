@@ -1,6 +1,6 @@
 [package]
 name = "py_chunks"
-version = "0.6.2"
+version = "0.6.3"
 edition = "2021"
 # Keep stale local build artifacts (dist/ wheels) out of any packaged archive.
 exclude = ["/dist"]

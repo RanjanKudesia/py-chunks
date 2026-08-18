@@ -1400,15 +1400,38 @@ def test_page_aware_no_split_below_limit(tmp_path: Path):
 @real_files
 @pytest.mark.parametrize("size", ["1000", "5000"])
 def test_real_xlsx_semantic_pre_sort_reduces_chunks(size):
-    """After pre-sort, Gender grouping yields exactly 2 consecutive runs (Female, Male)."""
+    """After pre-sort, Gender grouping yields exactly 2 consecutive runs (Female, Male).
+
+    A run is identified by `group_index`, not by chunk count: a run larger than
+    the 1,500-char semantic cap is emitted as several chunks that share one
+    `group_index`. This assertion used to read `len(non_fallback) == 2`, which
+    only held because the spreadsheet `semantic` path applied no size bound at
+    all and returned one unbounded chunk per category — the defect fixed in
+    TECH_DEBT T1 (a 2,946,106-char chunk on this very corpus). The grouping
+    behaviour under test is unchanged; only its expression is.
+    """
     path = str(_REAL_FILES[size])
     chunks, _ = chunk_xlsx(path, mode="semantic")
     non_fallback = [c for c in chunks if not c["metadata"]["used_fallback"]]
-    assert len(non_fallback) == 2, (
-        f"Pre-sorted Gender should yield 2 chunks, got {len(non_fallback)}"
+
+    group_ids = sorted({c["metadata"]["group_index"] for c in non_fallback})
+    assert group_ids == [0, 1], (
+        f"Pre-sorted Gender should yield 2 groups, got {len(group_ids)}: {group_ids}"
     )
+    assert {c["metadata"]["category_value"] for c in non_fallback} == {"Female", "Male"}
+
     cat_values = [c["metadata"]["category_value"] for c in non_fallback]
     assert cat_values == sorted(cat_values), "Chunks must be in alphabetical order"
+
+    # The bound the T1 fix introduced: only an indivisible single row may exceed.
+    oversized = [
+        c
+        for c in non_fallback
+        if len(c["content"]) > 1500 and c["metadata"]["actual_row_count"] > 1
+    ]
+    assert not oversized, (
+        f"{len(oversized)} multi-row semantic chunks exceeded the 1,500-char cap"
+    )
 
 
 @real_files

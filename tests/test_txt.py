@@ -27,9 +27,10 @@ TXT_DIR = Path(__file__).resolve().parents[2] / "test_files" / "txt"
 # fixture counts the moment it is added (#34).
 ALL_TXT_FILES = sorted(TXT_DIR.glob("*.txt")) if TXT_DIR.exists() else []
 
-# Files that are *meant* to raise — an empty or whitespace-only document has no
-# content to chunk, and saying so is the contract. They are excluded from the
-# sweeps that assert non-empty output and asserted on directly instead.
+# Files that are *meant* to produce no chunks — an empty or whitespace-only
+# document parses fine and simply has nothing to chunk, so it returns `[]`
+# (TECH_DEBT T6; these used to raise). They are excluded from the sweeps that
+# assert non-empty output and asserted on directly in TestTxtDegenerateInputs.
 EMPTY_FIXTURES = {"edge_empty.txt", "edge_whitespace_only.txt"}
 CHUNKABLE_TXT_FILES = [p for p in ALL_TXT_FILES if p.name not in EMPTY_FIXTURES]
 
@@ -419,12 +420,28 @@ def _fixture(name: str) -> Path:
 
 
 class TestTxtDegenerateInputs:
-    """A document with nothing in it must say so, not return an empty list."""
+    """An empty document returns `[]`; only a broken one raises.
+
+    This class used to assert the opposite ("must say so, not return an empty
+    list"). That contract was inconsistent: docx/ppt/xlsx already returned `[]`
+    for exactly this condition while txt/html/md raised, so whether "no content"
+    was an error depended on the file extension (TECH_DEBT T6). The contract is
+    now one rule across every format:
+
+      * parsed fine, nothing to chunk  -> `[]`
+      * structurally invalid           -> typed exception carrying a remedy
+        (e.g. a PDF with no text layer says to pass `list_images`)
+
+    Callers therefore branch on `if not chunks:` for emptiness and on the
+    exception for failure — the two are no longer conflated.
+    """
 
     @pytest.mark.parametrize("name", sorted(EMPTY_FIXTURES))
-    def test_empty_input_raises_rather_than_returning_nothing(self, name):
-        with pytest.raises(RuntimeError, match="empty"):
-            get_chunks(str(_fixture(name)), mode="structural")
+    def test_empty_input_returns_empty_list(self, name):
+        chunks = get_chunks(str(_fixture(name)), mode="structural")
+        if isinstance(chunks, tuple):
+            chunks = chunks[0]
+        assert chunks == []
 
     @pytest.mark.parametrize(
         "name", ["edge_single_line_no_newline.txt", "edge_single_word.txt"]

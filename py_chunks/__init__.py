@@ -32,6 +32,7 @@ from .chunkers.txt import chunk_txt, stream_chunk_txt
 from .chunkers.xlsx import chunk_xlsx, stream_chunk_xlsx
 
 # Routing tables re-exported for introspection (tests rely on _MD_DISPATCH).
+from .fit import fit_tokens
 from ._dispatch import _DISPATCH, _MD_DISPATCH  # pylint: disable=unused-import
 from ._sources import (
     ChunksResult,
@@ -70,6 +71,8 @@ os.environ.setdefault("PY_CHUNKS_PACKAGE_DIR", str(_pkg_dir))
 __all__ = [
     # Package metadata
     "__version__",
+    # Token fitting (parity-exempt — see py_chunks/fit.py)
+    "fit_tokens",
     # Result types
     "ChunksResult",
     "MarkdownResult",

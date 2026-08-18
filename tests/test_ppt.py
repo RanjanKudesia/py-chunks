@@ -85,42 +85,86 @@ def test_metadata_is_slide_aware(fp):
     assert meta["document_metadata"]["total_slides"] >= meta["slide_number"]
 
 
+# These four tests were written against three hand-picked decks and asserted
+# properties of *those fixtures* rather than of the engine. The 2026-08-14 corpus
+# expansion (3 -> 28 real-world decks) falsified them, measured as follows:
+#
+#   * `section` GROUPS slides under a heading, so it emits FEWER chunks than
+#     slides whenever a deck has untitled slides (poi_bug60345_paperfigures:
+#     10 slides -> 7 sections; poi_bug60345_suba: 13 -> 12).
+#   * `semantic` merges by continuity AND splits at the 1,500-char cap, so it has
+#     no fixed relation to slide count in EITHER direction
+#     (poi_br_tvcamboriu_pensar: 14 -> 3; poi_42486: 33 slides -> 34 chunks).
+#   * Real decks exist with no titled slide and with no bullet list at all.
+#
+# Only `page_aware` is genuinely one-chunk-per-slide. The assertions below keep
+# every real engine invariant and drop only the fixture coincidences — with
+# corpus-level guards so nothing can pass vacuously.
+
+
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
 @pytest.mark.parametrize("mode", PER_SLIDE_MODES)
-def test_per_slide_modes_equal_slide_count(fp, mode):
+def test_per_slide_mode_chunk_counts(fp, mode):
     n_slides = _slide_count(fp)
     chunks, _ = chunk_ppt(str(fp), mode=mode)
-    assert len(chunks) == n_slides
+    if mode == "page_aware":
+        assert len(chunks) == n_slides
+    elif mode == "section":
+        # Groups by slide title; never splits a slide.
+        assert 1 <= len(chunks) <= n_slides
+    else:  # semantic
+        assert len(chunks) >= 1
 
 
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
-def test_titles_detected_as_headings(fp):
+def test_headings_are_slide_level(fp):
+    """Any heading a deck yields must be slide-level; not every deck has one."""
     chunks, _ = chunk_ppt(str(fp), mode="default")
-    headings = [c for c in chunks if c["content_type"] == "heading"]
-    # Every deck in the suite has at least one titled slide.
-    assert len(headings) >= 1
-    for h in headings:
+    for h in (c for c in chunks if c["content_type"] == "heading"):
         assert h["metadata"]["heading_level"] == 2
 
 
+def test_corpus_exercises_titled_decks():
+    """Guard: `test_headings_are_slide_level` must not pass vacuously."""
+    titled = sum(
+        1
+        for fp in PPT_FILES
+        if any(c["content_type"] == "heading" for c in chunk_ppt(str(fp), mode="default")[0])
+    )
+    assert titled >= 1, "no deck in the corpus yields a heading"
+
+
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
-def test_markdown_has_headings_and_separators(fp):
+def test_markdown_has_slide_separators(fp):
     md = ppt_to_markdown(str(fp))
     assert md.strip()
-    n_slides = _slide_count(fp)
-    if n_slides > 1:
+    if _slide_count(fp) > 1:
         assert "---" in md  # slide separators
-    assert md.count("## ") >= 1  # at least one slide title
 
 
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)
-def test_bullets_emitted_for_multi_item_slides(fp):
-    # All sample decks have multi-line body placeholders -> bullet lists, which
-    # must surface both as bullet_list chunks and as Markdown "- " bullets.
+def test_bullets_agree_between_chunks_and_markdown(fp):
+    """A deck yielding bullet_list chunks must also render Markdown bullets.
+
+    The implication runs one way: plenty of real decks have no multi-line body
+    placeholder and so no bullets at all. What must never happen is the two
+    surfaces disagreeing — `get_chunks` seeing a list that `get_markdown` drops.
+    """
     chunks, _ = chunk_ppt(str(fp), mode="default")
-    assert any(c["content_type"] == "bullet_list" for c in chunks)
+    if not any(c["content_type"] == "bullet_list" for c in chunks):
+        return
     md = ppt_to_markdown(str(fp))
     assert "\n- " in md or md.startswith("- ")
+
+
+def test_corpus_exercises_bulleted_decks():
+    """Guard: `test_bullets_agree_between_chunks_and_markdown` must not pass vacuously."""
+    bulleted = sum(
+        1
+        for fp in PPT_FILES
+        if any(c["content_type"] == "bullet_list" for c in chunk_ppt(str(fp), mode="default")[0])
+    )
+    assert bulleted >= 1, "no deck in the corpus yields a bullet_list chunk"
 
 
 @pytest.mark.parametrize("fp", PPT_FILES, ids=lambda p: p.name)

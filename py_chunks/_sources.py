@@ -130,7 +130,7 @@ def get_chunks_from_path(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Chunk any supported document from a local path.
@@ -188,7 +188,7 @@ def get_chunks_from_bytes(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Chunk a document from raw bytes (e.g. an API file upload).
@@ -261,7 +261,7 @@ def get_chunks_from_fileobj(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Chunk from a file-like object (open file, BytesIO, spooled temp file)."""
@@ -294,7 +294,7 @@ def get_chunks_from_upload(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Chunk from framework upload objects (e.g. FastAPI UploadFile)."""
@@ -356,7 +356,7 @@ def get_chunks_from_s3_presigned_url(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Download from a pre-signed URL and chunk the file."""
@@ -391,7 +391,7 @@ def stream_chunks_from_path(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Stream chunks from any supported document at a local path.
 
@@ -432,7 +432,7 @@ def stream_chunks_from_bytes(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Stream chunks from raw bytes (e.g. an API file upload).
 
@@ -490,7 +490,7 @@ def stream_chunks_from_fileobj(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Stream chunks from a file-like object (open file, BytesIO, etc.)."""
     inferred_name = filename or getattr(file_obj, "name", None)
@@ -521,7 +521,7 @@ def stream_chunks_from_upload(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Stream chunks from framework upload objects (e.g. FastAPI UploadFile)."""
     filename = getattr(upload_file, "filename", None)
@@ -580,7 +580,7 @@ def stream_chunks_from_s3_presigned_url(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Stream chunks from a document downloaded via pre-signed URL."""
     inferred_name = _url_filename(url, filename)
@@ -614,7 +614,7 @@ def stream_chunks(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> Any:
     """Unified streaming chunking entrypoint across paths, bytes, file objects, uploads, and URLs.
 
@@ -744,7 +744,7 @@ def get_chunks(
     sentences_per_chunk: int = 3,
     paragraphs_per_page: int = 15,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     list_images: bool = False,
 ) -> "list[dict] | ChunksResult":
     """Unified chunking entrypoint across paths, bytes, file objects, uploads, and URLs."""
