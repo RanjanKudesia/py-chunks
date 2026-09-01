@@ -111,12 +111,23 @@ def _assert_schema(chunks, label=""):
 
 
 def _no_duplicate_content(chunks, label=""):
-    """All chunk contents should be unique (no verbatim duplication)."""
+    """No verbatim duplication WITHIN a slide.
+
+    This asserted global uniqueness, which held only because every slide
+    carried its number as chrome text: once ``<a:fld type="slidenum">`` caches
+    stopped being extracted as content (save-time chrome, not text), two
+    genuinely identical slides — poi_HowWeRefactor.pptx repeats its
+    "Do Programmers Usually Floss Refactor?" divider as slides 7 and 11,
+    identical in the XML apart from the number field — correctly render
+    identical text. Duplication signals an extraction bug only within one
+    slide, so the key includes the slide.
+    """
     seen = set()
     for c in chunks:
-        assert c["content"] not in seen, \
+        key = (c["metadata"].get("slide_number"), c["content"])
+        assert key not in seen, \
             f"Duplicate content in {label}: {c['content'][:60]!r}"
-        seen.add(c["content"])
+        seen.add(key)
 
 
 def _avg_chunk_len(chunks) -> float:

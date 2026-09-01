@@ -360,11 +360,26 @@ class TestDocxSlidingWindow:
                 )
 
     def test_window_index_increments_from_zero(self, docx_file):
+        # window_index counts WINDOWS, 0-based — the published contract
+        # (chunking-modes/sliding-window.mdx: "which window this is") and what
+        # every sibling module emits. This test originally asserted
+        # indices == range(len(chunks)); that held in 0.6.2 only because a
+        # window could never split, so per-window and per-chunk coincided.
+        # The size cap added in 3ffbaa9 ("a 522,261-character single chunk is
+        # not a chunk") made them diverge: a split window's parts SHARE its
+        # index, so the strict-identity form became unsatisfiable under either
+        # semantics. The invariant that survives: starts at 0, contiguous,
+        # non-decreasing — pinned per-window (repeats allowed at splits) here
+        # and by rs-chunks/tests/docx_window_index.rs, which also proves the
+        # per-chunk variant is rejected.
         chunks = _get(docx_file, "sliding_window", window_size=3, overlap=1)
         indices = [c["metadata"]["window_index"] for c in chunks]
-        assert indices == list(range(len(chunks))), (
-            f"{docx_file.name}: window_index={indices}"
-        )
+        assert indices, f"{docx_file.name}: no chunks"
+        assert indices[0] == 0, f"{docx_file.name}: window_index={indices}"
+        for a, b in zip(indices, indices[1:]):
+            assert b in (a, a + 1), (
+                f"{docx_file.name}: window_index not contiguous: {indices}"
+            )
 
     def test_window_size_matches_requested(self, docx_file):
         for ws in [2, 3, 4]:
