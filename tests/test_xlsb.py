@@ -23,7 +23,17 @@ XLSB = fixtures("xlsb", "*.xlsb")
 GOOD = "calamine_issues.xlsb"
 ENCRYPTED = "calamine_pass_protected.xlsb"
 # Files that trigger an internal calamine panic — must degrade to a clean error.
-PANIC_PRONE = ["poi_Simple.xlsb", "calamine_issue_419.xlsb"]
+#
+# `calamine_issue_419.xlsb` was in this list until 2026-08-14. The calamine
+# 0.26 -> 0.35 upgrade (TECH_DEBT T12) FIXED the upstream bug this fixture was
+# named after: the file now parses cleanly and yields a chunk, so requiring it to
+# raise would pin the old defect as if it were the contract. It moved to
+# `NOW_PARSES` below, which asserts the improvement instead of asserting it away.
+PANIC_PRONE = ["poi_Simple.xlsb"]
+
+# Fixtures that USED to fail and now parse. Kept as explicit assertions so a
+# dependency downgrade or regression is caught rather than silently tolerated.
+NOW_PARSES = ["calamine_issue_419.xlsb"]
 
 
 def _good() -> Path:
@@ -40,12 +50,33 @@ def test_no_crash_contract():
 
 @pytest.mark.parametrize("name", PANIC_PRONE)
 def test_calamine_panic_becomes_catchable_error(name):
+    """A calamine panic is caught in Rust and re-raised as a normal Exception.
+
+    It must be an `Exception`, not a `BaseException`/abort, so `except Exception`
+    catches it.
+    """
     match = [f for f in XLSB if f.name == name]
     require(match)
-    # The key guarantee: a calamine panic is caught in Rust and re-raised as a
-    # normal Exception, not a BaseException/abort. `except Exception` must catch it.
+    path = str(match[0])
     with pytest.raises(Exception):  # noqa: B017
-        get_chunks(str(match[0]))
+        get_chunks(path)
+
+
+@pytest.mark.parametrize("name", NOW_PARSES)
+def test_previously_panicking_fixture_now_parses(name):
+    """Pins the TECH_DEBT T12 improvement: this file used to fail to open.
+
+    Under calamine 0.26 it raised; 0.35 fixed the upstream bug the fixture is
+    named after. Asserting the new behaviour means a dependency downgrade shows
+    up here instead of silently reintroducing the defect.
+    """
+    match = [f for f in XLSB if f.name == name]
+    require(match)
+    chunks = get_chunks(str(match[0]))
+    if isinstance(chunks, tuple):
+        chunks = chunks[0]
+    assert chunks, f"{name} should now parse into at least one chunk"
+    assert any(c["content"].strip() for c in chunks)
 
 
 @pytest.mark.parametrize("mode", XLSX_MODES)

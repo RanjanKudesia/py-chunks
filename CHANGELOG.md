@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Seeded 2026-08 from the git history for 0.4.5 → 0.6.0; earlier releases are
 summarised only by their tags.
 
+## [Unreleased]
+
+## [0.6.3] - 2026-08-18
+
+### Added
+- `fit_tokens(chunks, counter, budget, ...)` — re-fits `get_chunks` output to a
+  token budget using **your** tokenizer (tiktoken, HuggingFace, any
+  `Callable[[str], int]`). Guarantees no chunk exceeds the budget on all 36
+  formats while keeping `content_type` and `metadata`, including the repeated
+  table headers that make a retrieved row interpretable. Knobs: `min_tokens`,
+  `merge`, `split`, `merge_metadata`, `oversize`, `respect_boundaries`.
+  **Deliberately parity-exempt**: output depends on the counter you pass, so it
+  is not part of the byte-identical cross-SDK contract. `js-chunks` ships the
+  same helper as `fitTokens`.
+
+### Changed
+- `fit_tokens` now **rejects an unrecognised** `split` / `merge` /
+  `merge_metadata` / `oversize` value instead of silently falling through to a
+  default branch. A typo such as `split="sentances"` used to quietly select the
+  hard whitespace split — a different chunking strategy, applied without
+  complaint. A non-callable `counter` is rejected too.
+- **Empty documents return `[]` instead of raising** for `.txt`, `.html` and
+  `.md`. They now match `.docx`/`.ppt`/`.xlsx`, which always did this. A
+  structurally invalid file still raises a typed exception carrying a remedy —
+  e.g. a PDF with no text layer still tells you to pass `list_images`. Branch on
+  `if not chunks:` for emptiness and on the exception for failure.
+- **CSV/TSV `encoding` now defaults to `"auto"`** (was `"utf-8"`). UTF-8 is tried
+  strictly first, so any file that already decoded is byte-identical; detection
+  only runs where the old code raised. A latin-1 CSV now reads like a latin-1
+  `.txt` instead of failing. Naming an encoding explicitly still forces it.
+- `chunk_xlsx(mode="default")` is accepted. It always worked through
+  `get_chunks`, and the engine's dispatch arm is `"row" | "default"` — only the
+  Python validator and the error message disagreed.
+
+### Fixed
+
+- **HTML that is not UTF-8 now decodes** instead of raising `OSError` or
+  returning mojibake. An HTML document is read using its own declared encoding:
+  BOM, then valid UTF-8, then `<meta charset=…>`, then detection. A
+  `windows-1251` or `iso-8859-6` page now chunks correctly. Valid UTF-8 always
+  wins over a conflicting declaration, so nothing that already worked changes.
+  Engine change — applies to all three SDKs.
+
+- A malformed `.xls` could drive unbounded allocation and get the process
+  OOM-killed — uncatchably, since it happened before any panic. Upgraded the
+  spreadsheet reader; 9 of Apache POI's 15 fuzzer fixtures previously allocated
+  >2 GB from inputs as small as 1,782 bytes. That upgrade also fixed four
+  parsing defects: a custom number format now applied, stray carriage returns
+  normalised out of cell text, an ODS column offset corrected, and one XLSB file
+  that previously failed to open.
+- Spreadsheet `semantic` mode had no size bound and could emit a
+  2.9-million-character chunk; it now respects the documented 1,500-character
+  cap, splitting at row boundaries.
+
 ## [0.6.2] - 2026-08-08
 
 ### Fixed

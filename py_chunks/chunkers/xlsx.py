@@ -7,7 +7,13 @@ from pathlib import Path
 
 from py_chunks import _rust
 
-_XLSX_MODES = {"row", "table", "sheet",
+# "default" is an accepted alias for "row" — the engine's dispatch arm is
+# `"row" | "default"` and `get_chunks(..., mode="default")` has always worked on
+# spreadsheets. Omitting it here meant `chunk_xlsx(mode="default")` raised while
+# `get_chunks(mode="default")` succeeded on the same file, and the error message
+# then advertised a mode list the engine did not actually enforce (TECH_DEBT T8).
+# The docs already document it: chunking-modes/index.mdx lists "`row` (= `default`)".
+_XLSX_MODES = {"row", "default", "table", "sheet",
                "sliding_window", "page_aware", "semantic"}
 _XLSX_SERIALIZERS = {"key_value"}
 

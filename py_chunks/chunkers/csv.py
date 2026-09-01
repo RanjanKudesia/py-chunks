@@ -8,6 +8,12 @@ from pathlib import Path
 from py_chunks import _rust
 
 _CSV_MODES = {"row", "default", "sliding_window", "page_aware"}
+# "auto" detects the encoding the way the `.txt` path always has (UTF-8 strictly
+# first, then UTF-8-BOM / UTF-16 LE+BE / Windows-1252). It is the default because
+# the same latin-1 bytes decoded fine as `.txt` and raised as `.csv`
+# (TECH_DEBT C4). UTF-8 is tried first, so any file that already decoded keeps
+# byte-identical output — detection only runs where the old code errored.
+_CSV_ENCODINGS = {"auto", "utf-8", "utf-8-bom", "latin-1", "windows-1252"}
 _CSV_SUFFIXES = (".csv", ".tsv")
 
 
@@ -42,9 +48,10 @@ def _validate_csv_options(
         raise ValueError("window_size must be greater than 0")
     if overlap >= window_size:
         raise ValueError("overlap must be less than window_size")
-    if encoding.lower() not in {"utf-8", "utf-8-bom", "latin-1", "windows-1252"}:
+    if encoding.lower() not in _CSV_ENCODINGS:
         raise ValueError(
-            "encoding must be one of 'utf-8', 'utf-8-bom', 'latin-1', or 'windows-1252'"
+            "encoding must be one of 'auto', 'utf-8', 'utf-8-bom', 'latin-1', "
+            "or 'windows-1252'"
         )
 
 
@@ -73,7 +80,7 @@ def chunk_csv(
     overlap: int = 1,
     include_headers: bool = True,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     skip_empty_rows: bool = True,
 ) -> tuple[list[dict], dict]:
     path = Path(file_path)
@@ -103,7 +110,7 @@ def stream_chunk_csv(
     overlap: int = 1,
     include_headers: bool = True,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
     skip_empty_rows: bool = True,
 ):
     path = Path(file_path)
@@ -124,7 +131,7 @@ def stream_chunk_csv(
 def csv_to_markdown(
     file_path: str,
     delimiter: str | None = None,
-    encoding: str = "utf-8",
+    encoding: str = "auto",
 ) -> str:
     """Convert a CSV file to a Markdown pipe table.
 
@@ -132,8 +139,11 @@ def csv_to_markdown(
         file_path: Path to the .csv file.
         delimiter: Column separator. ``None`` (default) = auto-detect from the
                    first data line. Accepts ``','``, ``'\\t'``, ``';'``, ``'|'``.
-        encoding:  File encoding. One of ``"utf-8"`` (default), ``"utf-8-bom"``,
-                   ``"latin-1"``, ``"windows-1252"``.
+        encoding:  File encoding. ``"auto"`` (default) tries UTF-8 strictly and
+                   falls back to detection (UTF-8-BOM, UTF-16 LE/BE,
+                   Windows-1252) exactly as the ``.txt`` path does. Explicit
+                   values: ``"utf-8"``, ``"utf-8-bom"``, ``"latin-1"``,
+                   ``"windows-1252"``.
 
     Returns:
         Markdown pipe table string with the first CSV row as the header row.
